@@ -16,9 +16,10 @@ import matplotlib.pyplot as plt
 import pickle
 import time
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 import leafmap
-from ipyleaflet import DrawControl, GeoJSON, Marker, DivIcon, LayerGroup, Popup
+from ipyleaflet import DrawControl, GeoJSON, Marker, DivIcon, LayerGroup, Popup, WidgetControl
 
 import xarray as xr
 import base64
@@ -191,6 +192,9 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
     -------
     None.
     """
+    # Retry settings
+    max_retries = 3
+    wait_seconds = 60    
     
     # Reproject to EPSG:3035 in order to apply the buffer in meters
     polygons_gdf = polygons_gdf.to_crs("EPSG:3035")  # Example CRS, adjust as needed
@@ -221,95 +225,113 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
         return
     
     
-    #I removed this code in order to implement the check if the job already run and all the output file are present
-    # Remove all previous files to avoid conflicts
-    #if os.path.exists(output_folder) :
-    #    shutil.rmtree(output_folder)
-        
-        # Create the folder
-    #    os.makedirs(output_folder)#, exist_ok=True)
-
     #information for file naming
     filename_prefix = f"S2_extract_{start_date}_{end_date}_parcelid"
+
+    subsets = split_extent(gdf_extent)
+
+    for index, subset in enumerate(subsets):
+        
+        #creating datacube -  S2 bands
+        subset = subset.to_crs(epsg=4326)
+        spatial_extent = get_spatial_extent(subset)
     
-    # list of bands to be extracted
-    # bands = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12", "SCL"]
-    bands = ["B02", "B03", "B04", "B08", "B11", "SCL"]
+        # list of bands to be extracted
+        # bands = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12", "SCL"]
+        bands = ["B02", "B03", "B04", "B08", "B11", "SCL"]
     
-    s2_bands = connection.load_collection(
-        "SENTINEL2_L2A",
-        temporal_extent=[start_date, end_date],
-        spatial_extent=get_spatial_extent(gdf_extent),
-        bands=bands,
-        max_cloud_cover=50
-    )
+        s2_bands = connection.load_collection(
+            "SENTINEL2_L2A",
+            temporal_extent=[start_date, end_date],
+            spatial_extent=spatial_extent,
+            bands=bands,
+            max_cloud_cover=50
+        )
     
-    #cloud masking
-    scl = s2_bands.band("SCL")
-    # cloud_mask = (scl == 0) | (scl == 1)
-    cloud_mask = (scl == 0) | (scl == 1) | (scl == 3) | (scl == 8) | (scl == 9) | (scl == 11)
+        #cloud masking
+        scl = s2_bands.band("SCL")
+        # cloud_mask = (scl == 0) | (scl == 1)
+        cloud_mask = (scl == 0) | (scl == 1) | (scl == 3) | (scl == 8) | (scl == 9) | (scl == 11)
     
-    cloud_mask = cloud_mask.resample_cube_spatial(s2_bands)
-    s2_bands_masked = s2_bands.mask(cloud_mask)
+        cloud_mask = cloud_mask.resample_cube_spatial(s2_bands)
+        s2_bands_masked = s2_bands.mask(cloud_mask)
 
-    #loading the dataset o json - for the spatial filter
-    features = json.loads(gdf_extent.to_crs("EPSG:4326").to_json())
+        #loading the dataset o json - for the spatial filter
+        features = json.loads(subset.to_json())
 
-    #spatial filter - using only the pixels intersecting the polygons
-    s2_bands_masked = s2_bands.filter_spatial(features)
+        #spatial filter - using only the pixels intersecting the polygons
+        s2_bands_masked = s2_bands.filter_spatial(features)
 
-    #adding NDVI index
-    indices = append_indices(s2_bands_masked,
-                             indices=["NDVI"],
-                             platform="SENTINEL2")
+        #adding NDVI index
+        indices = append_indices(s2_bands_masked,
+                                 indices=["NDVI"],
+                                 platform="SENTINEL2")
     
-    #creating the job for server execution 
-    job = indices.create_job(
-        title="S2 bands and NDVI",
-        description="Sentinel-2 L2A bands and NDVI",
-        out_format="netCDF",
-        filename_prefix=filename_prefix, 
-        feature_id_property=id_column,
-        sample_by_feature=True,
-    )
+        #creating the job for server execution 
+        job = indices.create_job(
+            title="S2 bands and NDVI",
+            description="Sentinel-2 L2A bands and NDVI",
+            out_format="netCDF",
+            filename_prefix=filename_prefix, 
+            feature_id_property=id_column,
+            sample_by_feature=True,
+        )
     
-    #excuting the job and saving the results as NetCDF
-
-    from rich.console import Console
-    console = Console(force_jupyter=True)
-
-    last_message = {"value": None}
+        #excuting the job and saving the results as NetCDF
     
-    with console.status("Submitting job...", spinner="dots") as status:     
-        def custom_print(raw_message):
-            #clear_output(wait=True)
-
-            # openeo status structure:
-            # "{elapsed_time} Job {job_id}: {message}"
-            elapsed_time = raw_message.split()[0]
-            job_id = raw_message.split()[2].replace(":","")
+        from rich.console import Console
+        console = Console(force_jupyter=True)
     
-            if "start" in raw_message:
-                message = f"🚀 Job submitted and starting. ID: {job_id}."
-            elif "created" in raw_message:
-                message = f"🚀 Job created. ID: {job_id}."
-            elif "queued" in raw_message:
-                message = f"⏳ [{elapsed_time}] Job (ID: {job_id}) is waiting in the queue. Please wait."
-            elif "running" in raw_message:
-                message = f"⚙️ [{elapsed_time}] Job (ID: {job_id}) is now running. Please wait."
-            elif "finished" in raw_message:
-                message = f"✅ [{elapsed_time}] Job (ID: {job_id}) has succesfully finished. You can now run the next cell."
-            else:
-                message = raw_message
+        for attempt in range(1, max_retries + 1):
+            last_message = {"value": None}
 
-            last_message["value"] = message
-            status.update(message)
+            try:
+                with console.status("Submitting job...", spinner="dots") as status:
 
-        job.start_and_wait(print=custom_print)
+                    def custom_print(raw_message):
+                        try:
+                            elapsed_time = raw_message.split()[0]
+                            job_id = raw_message.split()[2].replace(":", "")
+                        except Exception:
+                            elapsed_time = ""
+                            job_id = "unknown"
 
-    print(last_message["value"])
+                        if "start" in raw_message:
+                            message = f"🚀 Job submitted and starting. ID: {job_id}."
+                        elif "created" in raw_message:
+                            message = f"🚀 Job created. ID: {job_id}."
+                        elif "queued" in raw_message:
+                            message = f"⏳ [{elapsed_time}] Job (ID: {job_id}) is waiting in the queue. Please wait."
+                        elif "running" in raw_message:
+                            message = f"⚙️ [{elapsed_time}] Job (ID: {job_id}) is now running. Please wait."
+                        elif "finished" in raw_message:
+                            message = f"✅ [{elapsed_time}] Job (ID: {job_id}) has succesfully finished."
+                        else:
+                            message = raw_message
 
-    job.get_results().download_files(output_folder)
+                        last_message["value"] = message
+                        status.update(message)
+
+                    job.start_and_wait(print=custom_print)
+
+                if last_message["value"] is not None:
+                    print(last_message["value"])
+
+                job_status = job.status()
+                if job_status == "finished":
+                    job.get_results().download_files(output_folder)
+                    break
+                else:
+                    raise RuntimeError(f"Job ended with status '{job_status}'")
+
+            except Exception as e:
+                print(f"job failed (attempt {attempt}/{max_retries}): {e}")
+
+                if attempt < max_retries:
+                    print(f"retrying in {wait_seconds} seconds...")
+                    time.sleep(wait_seconds)
+                else:
+                    print("job permanently failed after 3 retries.")
 
 def download_netcdf_ext(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_column : str, \
                         start_date : str, end_date : str, connection ) :
@@ -946,6 +968,29 @@ class DrawPolygonDashboard(widgets.VBox):
         # Validation flag
         self._ok_dates = False
 
+        self.basemap_selector = widgets.Dropdown(
+            options=[
+                ("OpenStreetMap", "OpenStreetMap.Mapnik"),
+                ("Esri World Imagery", "Esri.WorldImagery"),
+                ("OpenTopoMap", "OpenTopoMap"),
+                ("CartoDB Positron", "CartoDB.Positron"),
+                ("CartoDB DarkMatter", "CartoDB.DarkMatter"),
+            ],
+            value="OpenStreetMap.Mapnik",
+            description="Basemap:",
+            style={"description_width": "initial"},
+            layout=widgets.Layout(width="270px")
+        )
+        self.basemap_selector.observe(self._on_basemap_change, names="value")
+
+        self.basemap_box = widgets.VBox(
+            [self.basemap_selector],
+            layout=widgets.Layout(
+                padding="6px",
+                width="290px"
+            )
+        )
+
         # Date pickers
         self.start_date = widgets.DatePicker(
             description="Start date:",
@@ -978,6 +1023,12 @@ class DrawPolygonDashboard(widgets.VBox):
         # Setup drawing system
         self._setup_draw_control()
 
+        self.basemap_control = WidgetControl(
+            widget=self.basemap_box,
+            position="topright"
+        )
+        self.m.add_control(self.basemap_control)
+
         # Layout
         self.controls_top = widgets.HBox([
             self.start_date,
@@ -985,10 +1036,20 @@ class DrawPolygonDashboard(widgets.VBox):
             self.run_button
         ])
 
+        self.controls_box = widgets.VBox([
+            self.controls_top,
+            self.date_output
+        ])
+
+        # dedicated area where visualisation controls/results will appear
+        self.viewer_box = widgets.Output()
+        self.viewer = None
+
         self.children = [
             self.m,
-            self.controls_top,
-            self.output
+            self.controls_box,
+            self.output,
+            self.viewer_box
         ]
 
         # Events
@@ -996,10 +1057,51 @@ class DrawPolygonDashboard(widgets.VBox):
         self.end_date.observe(self._validate_end_date, names="value")
         self.run_button.on_click(self._run_process)
 
+    def _on_basemap_change(self, change):
+        if change["name"] != "value":
+            return
+    
+        basemap_name = change["new"]
+    
+        try:
+            known_basemaps = {
+                "OpenStreetMap.Mapnik",
+                "Esri.WorldImagery",
+                "OpenTopoMap",
+                "CartoDB.Positron",
+                "CartoDB.DarkMatter",
+            }
+    
+            to_remove = []
+            for layer in self.m.layers:
+                layer_name = getattr(layer, "name", "")
+                if layer_name in known_basemaps:
+                    to_remove.append(layer)
+    
+            for layer in to_remove:
+                self.m.remove_layer(layer)
+    
+            self.m.add_basemap(basemap_name)
+    
+        except Exception as e:
+            with self.output:
+                print(f"❌ Could not change basemap: {e}")
+
     def _generate_session_id(self):
-        t = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = dt.datetime.now(ZoneInfo("Europe/Rome"))
+        t = now.strftime("%Y%m%d_%H%M%S")
         u = str(uuid.uuid4())[:6]
         return f"{t}_{u}"
+
+    def _build_run_tag(self, start_api, end_api):
+        """
+        Build a unique tag for the current run, based on dates + current polygons.
+        This ensures that if polygons are edited and the user runs again,
+        new outputs are produced and the viewer always points to the latest run.
+        """
+        payload = json.dumps(self.features_fc, sort_keys=True).encode("utf-8")
+        draw_hash = hashlib.md5(payload).hexdigest()[:10]
+        return f"{start_api}_{end_api}_{draw_hash}"
 
     def _update_run_button(self):
         self.run_button.disabled = self._is_running or not self._ok_dates
@@ -1263,27 +1365,36 @@ class DrawPolygonDashboard(widgets.VBox):
             self._set_running_state(True)
 
             try:
-                # Convert drawn polygons to GeoDataFrame
+                # Convert current drawn polygons to GeoDataFrame
                 self.gdf = features_fc_to_gdf(self.features_fc)
-
-                # Save session outputs
-                self.output_folder = f"output/S2/manual_parcel/session_{self.session_id}"
-                os.makedirs(self.output_folder, exist_ok=True)
-
-                # Save GeoJSON for reproducibility
-                self.geojson_path = os.path.join(self.output_folder, "polygons.geojson")
-                self.gdf.to_file(self.geojson_path, driver="GeoJSON")
 
                 # Dates for API
                 start_api = self.start_date.value.strftime("%Y-%m-%d")
                 end_api = self.end_date.value.strftime("%Y-%m-%d")
-                self.dataset_tag = _build_dataset_tag(start_api, end_api, self.session_id)
+
+                # Build a run-specific tag/folder from current polygons + current dates
+                run_tag = self._build_run_tag(start_api, end_api)
+                self.dataset_tag = run_tag
+
+                self.output_folder = os.path.join(
+                    "output",
+                    "S2",
+                    "manual_parcel",
+                    f"session_{self.session_id}",
+                    run_tag
+                )
+                os.makedirs(self.output_folder, exist_ok=True)
+
+                # Save current polygons for reproducibility
+                self.geojson_path = os.path.join(self.output_folder, "polygons.geojson")
+                self.gdf.to_file(self.geojson_path, driver="GeoJSON")
 
                 print(f"Session ID: {self.session_id}")
+                print(f"Run tag: {run_tag}")
                 print(f"Saved polygons: {self.geojson_path}")
                 print(f"Running process for {len(self.gdf)} polygon(s)...")
 
-                # Download NetCDFs
+                # Download NetCDFs for the CURRENT polygons and CURRENT dates
                 download_netcdf(
                     self.gdf,
                     self.output_folder,
@@ -1295,14 +1406,13 @@ class DrawPolygonDashboard(widgets.VBox):
 
                 print("Processing finished.")
 
-                # Reuse the same map and append visualization controls below it
-                viewer = MapAndPlotWidget(self)
+                # Refresh viewer so it always points to the latest run
+                self.viewer = MapAndPlotWidget(self)
 
-                self.children = [
-                    self.m,
-                    viewer.controls_box,
-                    viewer.output_log
-                ]
+                with self.viewer_box:
+                    clear_output()
+                    display(self.viewer.controls_box)
+                    display(self.viewer.output_log)
 
             except Exception as e:
                 print(f"❌ Processing Error: {e}")
@@ -1419,6 +1529,11 @@ class MapAndPlotWidget(widgets.VBox):
         ndvi_dir = os.path.join(self.output_folder, 'ndvi')
         os.makedirs(ndvi_dir, exist_ok=True)
         return os.path.join(ndvi_dir, f"{parcel_id}_NDVI_{self.dataset_tag}.png")
+
+    def _get_cview_png_path(self, parcel_id, suffix):
+        cview_dir = os.path.join(self.output_folder, 'cview')
+        os.makedirs(cview_dir, exist_ok=True)
+        return os.path.join(cview_dir, f"{parcel_id}_{suffix}_{self.dataset_tag}.png")
 
     def _get_cview_pickle_path(self, parcel_id, suffix):
         cview_dir = os.path.join(self.output_folder, 'cview')
@@ -1752,9 +1867,12 @@ class MapAndPlotWidget(widgets.VBox):
         os.makedirs(cview_dir, exist_ok=True)
 
         if is_scatter:
-            cview_filename = self._get_cview_pickle_path(parcel_id, f"{sc_dict['x']}_{sc_dict['y']}_scatter")
+            suffix = f"{sc_dict['x']}_{sc_dict['y']}_scatter"
         else:
-            cview_filename = self._get_cview_pickle_path(parcel_id, ''.join(bandlist))
+            suffix = ''.join(bandlist)
+        
+        cview_filename = self._get_cview_pickle_path(parcel_id, suffix)
+        cview_png = self._get_cview_png_path(parcel_id, suffix)
     
         if not os.path.exists(cview_filename):
             parcel = self.gdf[self.gdf[self.id_column] == parcel_id]
@@ -1781,6 +1899,7 @@ class MapAndPlotWidget(widgets.VBox):
                         out_tif_folder_base=cview_dir,
                         stretch_table=stretch_table
                     )
+                fig.savefig(cview_png, dpi=100, bbox_inches='tight')
                 with open(cview_filename, 'wb') as f:
                     pickle.dump(fig, f)
                 print("Done!")
