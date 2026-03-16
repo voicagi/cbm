@@ -254,13 +254,6 @@ def calendar_view_half_weekly(ds, parcel = None, name_cols = None, band_list = N
 
             if parcel is not None :
                 parcel.plot(ax=a[act_row][act_col], facecolor='none', edgecolor=vector_color)
-
-    output_file = output_jpg_folder + "/" + str(parcel_name) + "_" + "".join(band_list)
-    fig.savefig(output_file  + ".png", dpi = image_resolution, bbox_inches='tight')  
-
-    # Also Pickle the figure object
-    with open(output_file  + ".pickle", 'wb') as f:
-        pickle.dump(fig, f)
     
     return fig, a
 
@@ -395,10 +388,6 @@ def calendar_view_half_weekly_scatter(ds, parcel = None, name_cols = None, \
                 
             if act_row != num_rows - 1 :
                 a[act_row][act_col].get_xaxis().set_visible(False)
-
-
-    output_jpg_file = output_jpg_folder + "/" + str(parcel_name) + "_" + sc_dict["x"] + "_" + sc_dict["y"] + "_scatter.png"
-    fig.savefig(output_jpg_file, dpi = image_resolution, bbox_inches='tight')  
 
     return fig, a
 
