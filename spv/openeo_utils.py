@@ -1444,12 +1444,23 @@ class MapAndPlotWidget(widgets.VBox):
         self.netcdf_prefix = f"S2_extract_{start_date}_{end_date}_parcelid_"
         
         # Reuse existing map if provided, otherwise create one
+        self._reusing_existing_map = False
+        self._from_draw_dashboard = False
+
         if hasattr(openDashboard, "map"):
             self.m = openDashboard.map
+            self._reusing_existing_map = True
         elif hasattr(openDashboard, "m"):
             self.m = openDashboard.m
+            self._reusing_existing_map = True
         else:
             self.m = leafmap.Map(center=[0, 0], zoom=2)
+
+        # When the viewer is opened from the polygon-drawing workflow,
+        # keep the current map state as-is. This avoids re-adding the dataset
+        # layer and re-zooming after processing, which can re-show stale shapes
+        # from a previous edit state.
+        self._from_draw_dashboard = isinstance(openDashboard, DrawPolygonDashboard)
 
         self._id_ok = True
         self._plot_type_ok = False
@@ -1682,6 +1693,13 @@ class MapAndPlotWidget(widgets.VBox):
         """Initialize map layers and interactions"""
         with self.output_log:
             self.gdf = self.gdf.to_crs(epsg=4326)
+
+            # In the draw-polygon workflow we reuse the same map that already
+            # contains the user polygons. Do not add the dataset again and do
+            # not zoom again after processing, otherwise the pre-edit and
+            # post-edit shapes can both end up visible.
+            if self._reusing_existing_map and self._from_draw_dashboard:
+                return
 
             style = {'fillOpacity': 0.3, 'weight': 1, 'color': '#3388ff'}
             hover_style = {'fillOpacity': 0.6, 'color': 'red'}
