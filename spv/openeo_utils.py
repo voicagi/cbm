@@ -1389,8 +1389,8 @@ class DrawPolygonDashboard(widgets.VBox):
                 self.geojson_path = os.path.join(self.output_folder, "polygons.geojson")
                 self.gdf.to_file(self.geojson_path, driver="GeoJSON")
 
-                print(f"Session ID: {self.session_id}")
-                print(f"Run tag: {run_tag}")
+                #print(f"Session ID: {self.session_id}")
+                #print(f"Run tag: {run_tag}")
                 print(f"Saved polygons: {self.geojson_path}")
                 print(f"Running process for {len(self.gdf)} polygon(s)...")
 
@@ -1540,6 +1540,12 @@ class MapAndPlotWidget(widgets.VBox):
         ndvi_dir = os.path.join(self.output_folder, 'ndvi')
         os.makedirs(ndvi_dir, exist_ok=True)
         return os.path.join(ndvi_dir, f"{parcel_id}_NDVI_{self.dataset_tag}.png")
+
+    def _get_line_plot_path(self, parcel_id, band_name):
+        safe_band = str(band_name).replace(' ', '_').replace('/', '-')
+        plots_dir = os.path.join(self.output_folder, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        return os.path.join(plots_dir, f"{parcel_id}_{safe_band}_{self.dataset_tag}.png")
 
     def _get_cview_png_path(self, parcel_id, suffix):
         cview_dir = os.path.join(self.output_folder, 'cview')
@@ -1800,6 +1806,7 @@ class MapAndPlotWidget(widgets.VBox):
             return None
     
         parcel_id = self.id_dropdown.value
+        band_name = self.dd_plot_param.value
     
         output_path = self.output_folder
         netcdf_path = self._get_netcdf_path(parcel_id)
@@ -1815,9 +1822,13 @@ class MapAndPlotWidget(widgets.VBox):
     
         fig, ax = cgu.plot_csv_parcel(
             csv_filename,
-            band_to_plot=self.dd_plot_param.value,
+            band_to_plot=band_name,
             to_file=False
         )
+
+        plot_png = self._get_line_plot_path(parcel_id, band_name)
+        if (fig is not None) and (not os.path.exists(plot_png)):
+            fig.savefig(plot_png, bbox_inches='tight', dpi=100)
     
         return fig, ax
 
@@ -1925,6 +1936,8 @@ class MapAndPlotWidget(widgets.VBox):
             with open(cview_filename, 'rb') as f:
                 fig = pickle.load(f)
             ax = fig.axes
+            if (fig is not None) and (not os.path.exists(cview_png)):
+                fig.savefig(cview_png, dpi=100, bbox_inches='tight')
     
         return fig, ax
 
