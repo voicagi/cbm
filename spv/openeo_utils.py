@@ -1365,8 +1365,37 @@ class DrawPolygonDashboard(widgets.VBox):
             self._set_running_state(True)
 
             try:
+                # Minimal fix: when the user edits polygons, self.features_fc can still
+                # contain the pre-edit geometry. Right before processing, rebuild the
+                # current features from the DrawControl state and preserve aoi_id when possible.
+                current_features = self.features_fc
+                try:
+                    dc_data = getattr(self.dc, "data", None)
+                    if dc_data:
+                        rebuilt = []
+                        previous_features = list(self.features_fc.get("features", []))
+
+                        for idx, feat in enumerate(dc_data):
+                            props = dict(feat.get("properties", {}) or {})
+                            if "aoi_id" not in props and idx < len(previous_features):
+                                prev_props = previous_features[idx].get("properties", {}) or {}
+                                if "aoi_id" in prev_props:
+                                    props["aoi_id"] = prev_props["aoi_id"]
+
+                            rebuilt.append({
+                                "type": "Feature",
+                                "geometry": feat.get("geometry"),
+                                "properties": props,
+                            })
+
+                        if rebuilt:
+                            current_features = {"type": "FeatureCollection", "features": rebuilt}
+                            self.features_fc = current_features
+                except Exception:
+                    pass
+
                 # Convert current drawn polygons to GeoDataFrame
-                self.gdf = features_fc_to_gdf(self.features_fc)
+                self.gdf = features_fc_to_gdf(current_features)
 
                 # Dates for API
                 start_api = self.start_date.value.strftime("%Y-%m-%d")
@@ -1389,8 +1418,8 @@ class DrawPolygonDashboard(widgets.VBox):
                 self.geojson_path = os.path.join(self.output_folder, "polygons.geojson")
                 self.gdf.to_file(self.geojson_path, driver="GeoJSON")
 
-                #print(f"Session ID: {self.session_id}")
-                #print(f"Run tag: {run_tag}")
+                print(f"Session ID: {self.session_id}")
+                print(f"Run tag: {run_tag}")
                 print(f"Saved polygons: {self.geojson_path}")
                 print(f"Running process for {len(self.gdf)} polygon(s)...")
 
