@@ -6,6 +6,8 @@ Created on Wed Jan 21 09:41:40 2026
 """
 #%% Import Libraries
 import geopandas as gpd
+import tempfile
+import zipfile
 from shapely.geometry import box, shape
 import os
 import shutil
@@ -35,6 +37,53 @@ from ipywidgets import HTML
 
 import uuid
 from datetime import datetime
+
+
+def load_vector_dataset(file_path):
+    """
+    Load a vector dataset from GeoJSON, GPKG, KML, Shapefile, or ZIP shapefile.
+    Returns a GeoDataFrame.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext in [".geojson", ".json", ".gpkg", ".shp"]:
+        gdf = gpd.read_file(file_path)
+
+    elif ext == ".kml":
+        gdf = gpd.read_file(file_path, driver="KML")
+
+    elif ext == ".zip":
+        tmpdir = tempfile.mkdtemp(prefix="vector_upload_")
+        with zipfile.ZipFile(file_path, "r") as zf:
+            zf.extractall(tmpdir)
+
+        shp_files = []
+        for root, _, files in os.walk(tmpdir):
+            for f in files:
+                if f.lower().endswith(".shp"):
+                    shp_files.append(os.path.join(root, f))
+
+        if not shp_files:
+            raise ValueError("ZIP file does not contain any .shp file.")
+
+        if len(shp_files) > 1:
+            raise ValueError(
+                f"ZIP file contains multiple shapefiles: {shp_files}. "
+                "Please upload a ZIP with only one shapefile."
+            )
+
+        gdf = gpd.read_file(shp_files[0])
+
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+    if gdf.empty:
+        raise ValueError("The uploaded dataset is empty.")
+
+    if gdf.crs is None:
+        raise ValueError("The uploaded dataset has no CRS defined.")
+
+    return gdf
 
 
 def _safe_stem(path_or_name: str) -> str:
@@ -539,9 +588,9 @@ class OpenEODashboard(widgets.VBox):
 
         # 2. Initialize UI Components
         self.uploader = widgets.FileUpload(
-            accept='.geojson', 
+            accept='.geojson,.json,.gpkg,.kml,.zip', 
             multiple=False, 
-            description="Select GeoJSON",
+            description="Select dataset",
             layout=widgets.Layout(width='250px'),
             style={'description_width': 'initial'}
         )
@@ -657,8 +706,8 @@ class OpenEODashboard(widgets.VBox):
         if len(content) > MAX_BYTES:
             raise ValueError(f"❌ File size exceeds the maximum limit of {MAX_BYTES/(1024*1024):.0f} MB.")
 
-        if not filename.lower().endswith(".geojson"):
-            raise ValueError("❌ Invalid file format. Please upload a .geojson file.")
+        #if not filename.lower().endswith(".geojson"):
+        #    raise ValueError("❌ Invalid file format. Please upload a .geojson file.")
 
         return filename, content
     
@@ -696,11 +745,132 @@ class OpenEODashboard(widgets.VBox):
                 raise ValueError(f"❌ Feature {i} has geometry type '{gtype}'. Allowed: {sorted(allowed)}")
 
         return obj
+
+    def _validate_vector_dataset(self, file_name: str, content: bytes):
+        """
+        Validate an uploaded vector dataset and return it as a GeoDataFrame.
+    
+        Supported formats:
+          - .geojson / .json
+          - .gpkg
+          - .kml
+          - .zip   (ZIP containing exactly one shapefile)
+          - .shp   (only if somehow already available as a complete file on disk; ZIP is preferred)
+    
+        Notes:
+          - For shapefiles, prefer uploading a ZIP containing .shp, .shx, .dbf, and .prj.
+          - Returns a GeoDataFrame instead of raw JSON.
+        """
+        ext = os.path.splitext(file_name)[1].lower()
+    
+        tmpdir = tempfile.mkdtemp(prefix="uploaded_vector_")
+        input_path = os.path.join(tmpdir, file_name)
+    
+        # Save uploaded bytes to disk
+        with open(input_path, "wb") as f:
+            f.write(content)
+    
+        try:
+            # ---- Load according to format ----
+            if ext in {".geojson", ".json"}:
+                # Optional: keep explicit JSON validation for clearer error messages
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise ValueError("❌ File encoding error. Please ensure the file is UTF-8 encoded.")
+    
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"❌ Invalid JSON: {e}")
+    
+                if obj.get("type") != "FeatureCollection":
+                    raise ValueError("❌ GeoJSON must be a FeatureCollection.")
+    
+                feats = obj.get("features")
+                if not isinstance(feats, list) or len(feats) == 0:
+                    raise ValueError("❌ GeoJSON has no features.")
+    
+                gdf = gpd.read_file(input_path)
+    
+            elif ext == ".gpkg":
+                gdf = gpd.read_file(input_path)
+    
+            elif ext == ".kml":
+                gdf = gpd.read_file(input_path, driver="KML")
+    
+            elif ext == ".zip":
+                extract_dir = os.path.join(tmpdir, "unzipped")
+                os.makedirs(extract_dir, exist_ok=True)
+    
+                try:
+                    with zipfile.ZipFile(input_path, "r") as zf:
+                        zf.extractall(extract_dir)
+                except zipfile.BadZipFile:
+                    raise ValueError("❌ Invalid ZIP file.")
+    
+                shp_files = []
+                for root, _, files in os.walk(extract_dir):
+                    for fn in files:
+                        if fn.lower().endswith(".shp"):
+                            shp_files.append(os.path.join(root, fn))
+    
+                if not shp_files:
+                    raise ValueError("❌ ZIP file does not contain any .shp file.")
+    
+                if len(shp_files) > 1:
+                    raise ValueError("❌ ZIP file contains multiple shapefiles. Please provide only one shapefile per ZIP.")
+    
+                gdf = gpd.read_file(shp_files[0])
+    
+            elif ext == ".shp":
+                raise ValueError("❌ Please upload shapefiles as a ZIP containing .shp, .shx, .dbf, and .prj.")
+    
+            else:
+                raise ValueError(f"❌ Unsupported file format '{ext}'. Allowed: .geojson, .json, .gpkg, .kml, .zip")
+    
+            # ---- Generic validation ----
+            if gdf is None or gdf.empty:
+                raise ValueError("❌ The uploaded dataset has no features.")
+    
+            if "geometry" not in gdf.columns:
+                raise ValueError("❌ The uploaded dataset has no geometry column.")
+    
+            gdf = gdf[gdf.geometry.notnull()].copy()
+            gdf = gdf[~gdf.geometry.is_empty].copy()
+    
+            if gdf.empty:
+                raise ValueError("❌ All geometries are null or empty.")
+    
+            MAX_FEATURES = self.geojson_max_features
+            if len(gdf) > MAX_FEATURES:
+                raise ValueError(f"❌ Too many features ({len(gdf)}). Limit is {MAX_FEATURES}.")
+    
+            if gdf.crs is None:
+                raise ValueError("❌ The uploaded dataset has no CRS defined.")
+    
+            allowed = {"Polygon", "MultiPolygon"}
+            geom_types = gdf.geometry.geom_type
+    
+            invalid = [(i, gt) for i, gt in zip(gdf.index, geom_types) if gt not in allowed]
+            if invalid:
+                i, gt = invalid[0]
+                raise ValueError(
+                    f"❌ Feature {i} has geometry type '{gt}'. Allowed: {sorted(allowed)}"
+                )
+    
+            return gdf
+    
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"❌ Could not read the uploaded dataset: {e}")
     
     def _load_and_validate_gdf(self, content: bytes) -> gpd.GeoDataFrame:
         """Load with GeoPandas + minimal geometry/CRS sanity checks."""
         try:
-            gdf = gpd.read_file(io.BytesIO(content))
+            #gdf = gpd.read_file(io.BytesIO(content))
+            gdf = load_vector_dataset(dataset_path)
         except Exception as e:
             raise ValueError(f"❌ Could not read GeoJSON with GeoPandas: {e}")
 
@@ -750,45 +920,44 @@ class OpenEODashboard(widgets.VBox):
     def _on_upload(self, change):
         with self.msg_output:
             clear_output()
-
+    
             self._ok_upload = False
             self.gdf = None
             self.upload_filename = None
             self.upload_hash = None
             self.dataset_tag = None
-
+    
             try:
                 filename, content = self._read_upload_bytes()
                 self.upload_filename = filename
                 self.upload_hash = _build_dataset_hash(content)
-
-                # parse + basic structure checks (you don’t use obj yet, but it’s still a good early gate)
-                _ = self._validate_geojson_text(content)
-
-                # load + gdf checks
-                gdf = self._load_and_validate_gdf(content)
-
+    
+                # validate + load dataset
+                gdf = self._validate_vector_dataset(filename, content)
+    
                 self.gdf = gdf
-
+    
                 # Populate ID dropdown (no validation yet)
                 columns = [c for c in self.gdf.columns if c != "geometry"]
                 if len(columns) == 0:
-                    raise ValueError("❌ No attribute columns found (need at least one non-geometry column for Parcel ID).")
-
+                    raise ValueError(
+                        "❌ No attribute columns found (need at least one non-geometry column for Parcel ID)."
+                    )
+    
                 self.col_dropdown.options = columns
                 self.col_dropdown.disabled = False
-
+    
                 print(f"✅ Loaded {len(self.gdf)} parcels. Select time window and ID column to begin.")
                 self._ok_upload = True
-
+    
             except ValueError as e:
                 print(str(e))
                 self._ok_upload = False
-
+    
             except Exception as e:
                 print(f"❌ Error while processing upload: {e}")
                 self._ok_upload = False
-
+    
             finally:
                 self._update_run_button()
 
@@ -921,7 +1090,7 @@ class OpenEODashboard(widgets.VBox):
                 self.output_folder = output_folder
 
                 print(f"🗺️ Processing file: {filename}...")
-                print(f"Dataset hash: {upload_hash}")
+                #print(f"Dataset hash: {upload_hash}")
                 print(f"Date range: {start_str} → {end_str}")
                 
                 # Call your external function
@@ -1723,37 +1892,61 @@ class MapAndPlotWidget(widgets.VBox):
             fig, ax = out
             plt.show()
             plt.close(fig)
+    def _gdf_to_clean_geojson(self, gdf):
+        geojson = json.loads(gdf.to_json())
+    
+        reserved_props = {
+            "style",
+            "hover_style",
+            "styleUrl",
+            "icon",
+            "icons",
+        }
+    
+        for feature in geojson.get("features", []):
+            props = feature.get("properties", {})
+            if not isinstance(props, dict):
+                feature["properties"] = {}
+                continue
+    
+            for key in list(props.keys()):
+                if key in reserved_props:
+                    del props[key]
+    
+        return geojson
 
     def _on_start(self):
         """Initialize map layers and interactions"""
         with self.output_log:
             self.gdf = self.gdf.to_crs(epsg=4326)
-
+    
             # In the draw-polygon workflow we reuse the same map that already
             # contains the user polygons. Do not add the dataset again and do
             # not zoom again after processing, otherwise the pre-edit and
             # post-edit shapes can both end up visible.
             if self._reusing_existing_map and self._from_draw_dashboard:
                 return
-
+    
             style = {'fillOpacity': 0.3, 'weight': 1, 'color': '#3388ff'}
             hover_style = {'fillOpacity': 0.6, 'color': 'red'}
-
+    
             old_layer = self.m.find_layer("Parcels")
             if old_layer:
                 self.m.remove_layer(old_layer)
-             
+    
+            clean_geojson = self._gdf_to_clean_geojson(self.gdf)
+    
             self.m.add_geojson(
-                self.gdf.__geo_interface__, 
+                clean_geojson,
                 layer_name="Parcels",
                 style=style,
                 hover_style=hover_style
             )
-                 
+    
             layer = self.m.find_layer("Parcels")
             if layer:
                 layer.on_click(self._handle_click_on_map)
-
+    
             self.m.zoom_to_gdf(self.gdf)
 
     def _set_dropdown_silently(self, value):
