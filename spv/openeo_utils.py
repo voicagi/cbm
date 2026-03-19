@@ -106,7 +106,7 @@ import ncdf_graph_utils as ngu
 
 
 #%% support functions
-def split_extent(gdf : gpd.GeoDataFrame, max_size : int = 10000) -> list :
+def split_extent(gdf : gpd.GeoDataFrame, max_size : int = 50000) -> list :
     """
     Split the original data frame in a list gdfs with with a specified maximum
     extent
@@ -278,15 +278,18 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
     filename_prefix = f"S2_extract_{start_date}_{end_date}_parcelid"
 
     subsets = split_extent(gdf_extent)
+    total_subsets = len(subsets)
+    print(f"Processing {total_subsets} subset(s)...")
 
-    for index, subset in enumerate(subsets):
-        
-        #creating datacube -  S2 bands
+    for subset_idx, subset in enumerate(subsets, start=1):
+    
+        print(f"\n▶ Processing subset {subset_idx}/{total_subsets} ({len(subset)} polygon(s))")
+    
+        # creating datacube - S2 bands
         subset = subset.to_crs(epsg=4326)
         spatial_extent = get_spatial_extent(subset)
     
         # list of bands to be extracted
-        # bands = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12", "SCL"]
         bands = ["B02", "B03", "B04", "B08", "B11", "SCL"]
     
         s2_bands = connection.load_collection(
@@ -297,46 +300,54 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
             max_cloud_cover=50
         )
     
-        #cloud masking
+        # cloud masking
         scl = s2_bands.band("SCL")
-        # cloud_mask = (scl == 0) | (scl == 1)
-        cloud_mask = (scl == 0) | (scl == 1) | (scl == 3) | (scl == 8) | (scl == 9) | (scl == 11)
+        cloud_mask = (
+            (scl == 0) | (scl == 1) | (scl == 3) |
+            (scl == 8) | (scl == 9) | (scl == 11)
+        )
     
         cloud_mask = cloud_mask.resample_cube_spatial(s2_bands)
         s2_bands_masked = s2_bands.mask(cloud_mask)
-
-        #loading the dataset o json - for the spatial filter
-        features = json.loads(subset.to_json())
-
-        #spatial filter - using only the pixels intersecting the polygons
-        s2_bands_masked = s2_bands.filter_spatial(features)
-
-        #adding NDVI index
-        indices = append_indices(s2_bands_masked,
-                                 indices=["NDVI"],
-                                 platform="SENTINEL2")
     
-        #creating the job for server execution 
+        # loading the dataset to json - for the spatial filter
+        features = json.loads(subset.to_json())
+    
+        # spatial filter - using only the pixels intersecting the polygons
+        s2_bands_masked = s2_bands_masked.filter_spatial(features)
+    
+        # adding NDVI index
+        indices = append_indices(
+            s2_bands_masked,
+            indices=["NDVI"],
+            platform="SENTINEL2"
+        )
+    
+        # creating the job for server execution
         job = indices.create_job(
             title="S2 bands and NDVI",
             description="Sentinel-2 L2A bands and NDVI",
             out_format="netCDF",
-            filename_prefix=filename_prefix, 
+            filename_prefix=filename_prefix,
             feature_id_property=id_column,
             sample_by_feature=True,
         )
     
-        #excuting the job and saving the results as NetCDF
-    
+        # executing the job and saving the results as NetCDF
         from rich.console import Console
         console = Console(force_jupyter=True)
     
         for attempt in range(1, max_retries + 1):
             last_message = {"value": None}
-
+    
             try:
-                with console.status("Submitting job...", spinner="dots") as status:
-
+                print(f"   ↳ Attempt {attempt}/{max_retries}")
+    
+                with console.status(
+                    f"Subset {subset_idx}/{total_subsets}: submitting job...",
+                    spinner="dots"
+                ) as status:
+    
                     def custom_print(raw_message):
                         try:
                             elapsed_time = raw_message.split()[0]
@@ -344,43 +355,60 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
                         except Exception:
                             elapsed_time = ""
                             job_id = "unknown"
-
+    
                         if "start" in raw_message:
-                            message = f"🚀 Job submitted and starting. ID: {job_id}."
+                            message = (
+                                f"🚀 Subset {subset_idx}/{total_subsets}: "
+                                f"job submitted and starting. ID: {job_id}."
+                            )
                         elif "created" in raw_message:
-                            message = f"🚀 Job created. ID: {job_id}."
+                            message = (
+                                f"🚀 Subset {subset_idx}/{total_subsets}: "
+                                f"job created. ID: {job_id}."
+                            )
                         elif "queued" in raw_message:
-                            message = f"⏳ [{elapsed_time}] Job (ID: {job_id}) is waiting in the queue. Please wait."
+                            message = (
+                                f"⏳ Subset {subset_idx}/{total_subsets} "
+                                f"[{elapsed_time}] Job (ID: {job_id}) is waiting in the queue."
+                            )
                         elif "running" in raw_message:
-                            message = f"⚙️ [{elapsed_time}] Job (ID: {job_id}) is now running. Please wait."
+                            message = (
+                                f"⚙️ Subset {subset_idx}/{total_subsets} "
+                                f"[{elapsed_time}] Job (ID: {job_id}) is now running."
+                            )
                         elif "finished" in raw_message:
-                            message = f"✅ [{elapsed_time}] Job (ID: {job_id}) has succesfully finished."
+                            message = (
+                                f"✅ Subset {subset_idx}/{total_subsets} "
+                                f"[{elapsed_time}] Job (ID: {job_id}) has successfully finished."
+                            )
                         else:
-                            message = raw_message
-
+                            message = f"Subset {subset_idx}/{total_subsets}: {raw_message}"
+    
                         last_message["value"] = message
                         status.update(message)
-
+    
                     job.start_and_wait(print=custom_print)
-
+    
                 if last_message["value"] is not None:
                     print(last_message["value"])
-
+    
                 job_status = job.status()
                 if job_status == "finished":
                     job.get_results().download_files(output_folder)
+                    remaining = total_subsets - subset_idx
+                    print(f"✅ Finished subset {subset_idx}/{total_subsets}. Remaining: {remaining}")
                     break
                 else:
                     raise RuntimeError(f"Job ended with status '{job_status}'")
-
+    
             except Exception as e:
-                print(f"job failed (attempt {attempt}/{max_retries}): {e}")
-
+                print(f"❌ Subset {subset_idx}/{total_subsets} failed (attempt {attempt}/{max_retries}): {e}")
+    
                 if attempt < max_retries:
-                    print(f"retrying in {wait_seconds} seconds...")
+                    print(f"   ↳ Retrying in {wait_seconds} seconds...")
                     time.sleep(wait_seconds)
                 else:
-                    print("job permanently failed after 3 retries.")
+                    print(f"❌ Subset {subset_idx}/{total_subsets} permanently failed after {max_retries} retries.")
 
 def download_netcdf_ext(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_column : str, \
                         start_date : str, end_date : str, connection ) :
@@ -2042,7 +2070,7 @@ class MapAndPlotWidget(widgets.VBox):
         if not os.path.exists(csv_filename):
             self._compute_stats_csv(parcel_id, netcdf_path, csv_filename)
     
-        fig, ax = cgu.plot_csv_parcel(
+        fig, ax = cgu.plot_csv_parcel_std(
             csv_filename,
             band_to_plot=band_name,
             to_file=False

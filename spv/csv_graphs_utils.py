@@ -341,3 +341,109 @@ def plot_csv_parcel(csv_filename, output_folder : str = "./", \
         plt.close(fig) 
             
     return fig, ax
+
+def plot_csv_parcel_std(csv_filename, output_folder: str = "./",
+                    band_to_plot: str = "NDVI",
+                    cols_to_plot: list = ["band_mean", "band_std"],
+                    ax_dict=None, to_file=True):
+    """
+    Summary:
+        Function used to plot a time index extracted from a CSV file.
+        In this case, it assumes that all the bands are saved in a single file.
+        A single parcel is considered.
+
+    Arguments:
+        csv_filename - string indicating the CSV file to process
+
+        output_folder - folder where to save the graphs
+
+        band_to_plot - specifies which band should be plotted
+
+        cols_to_plot - columns to be used for the plotting. The list can
+                       contain either one value (only the time series will be
+                       plotted) or two. In this latter case, the second value
+                       will be used as dispersion element.
+
+    Returns:
+        fig, ax
+    """
+
+    filename = os.path.basename(csv_filename)
+
+    if not filename.endswith(".csv"):
+        raise ValueError("Not a correct csv file")
+
+    # Read CSV
+    df = pd.read_csv(csv_filename)
+
+    # Filter by band
+    df = df[df["band"] == band_to_plot].copy()
+
+    if df.empty:
+        raise ValueError(f"No data found for band '{band_to_plot}' in {csv_filename}")
+
+    # Convert dates
+    df["acq_date"] = pd.to_datetime(df["acq_date"])
+
+    # Parcel ID
+    fid = np.unique(df["Field_ID"].values).astype(str)[0]
+
+    # Output folder
+    if to_file and (not os.path.exists(output_folder)):
+        os.makedirs(output_folder)
+
+    # Sort by date
+    df.sort_values(by=["acq_date"], inplace=True)
+
+    # Create figure
+    if ax_dict is None:
+        fig, ax = plt.subplots(figsize=(13, 7))
+    else:
+        ax = ax_dict[fid]
+        fig = ax.get_figure()
+
+    if len(cols_to_plot) == 1:
+        df.plot(
+            kind="line",
+            x="acq_date",
+            y=cols_to_plot[0],
+            marker="o",
+            color="forestgreen",
+            linewidth=2,
+            ax=ax
+        )
+    else:
+        # Mean profile with std shown as vertical error bars
+        ax.errorbar(
+            df["acq_date"],
+            df[cols_to_plot[0]],
+            yerr=df[cols_to_plot[1]],
+            fmt="o-",
+            color="forestgreen",
+            ecolor="black",
+            elinewidth=1.2,
+            capsize=3,
+            capthick=1.2,
+            linewidth=2,
+            markersize=5
+        )
+
+    # Formatting
+    ax.set_ylabel(band_to_plot, fontsize=14)
+    ax.set_xlabel("Date", fontsize=14)
+    ax.set_title("Parcel id: " + str(fid), fontsize=14)
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+
+    ax.xaxis.grid()
+    ax.yaxis.grid()
+
+    ax.autoscale(tight=True)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    if to_file:
+        fig.savefig(f"{output_folder}/{fid}_{band_to_plot}.png")
+        plt.close(fig)
+
+    return fig, ax
