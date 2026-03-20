@@ -341,3 +341,132 @@ def plot_csv_parcel(csv_filename, output_folder : str = "./", \
         plt.close(fig) 
             
     return fig, ax
+
+    def plot_csv_parcel_std(csv_filename, output_folder: str = "./",
+                        band_to_plot: str = "NDVI",
+                        cols_to_plot: list = ["band_mean", "band_std"],
+                        ax_dict=None, to_file=True):
+        """
+        Summary :
+            Function used to plot a time index extracted from a CSV file.
+            In this case, it assumes that all the bands are saved in a single file.
+            A single parcel is considered.
+        """
+    
+        filename = os.path.basename(csv_filename)
+    
+        if not filename.endswith(".csv"):
+            raise ValueError("Not a correct csv file")
+    
+        # Read CSV
+        df = pd.read_csv(csv_filename)
+    
+        # Filter the df with respect to the specified band
+        df = df[df["band"] == band_to_plot].copy()
+    
+        # Convert the acquisition dates to datetime objects
+        df["acq_date"] = pd.to_datetime(df["acq_date"])
+    
+        # Determine the parcel id
+        fid = np.unique(df["Field_ID"].values).astype(str)[0]
+    
+        # Check if the output directory exists
+        if to_file and (not os.path.exists(output_folder)):
+            os.makedirs(output_folder)
+    
+        df.sort_values(by=["acq_date"], inplace=True)
+    
+        # Allocate the figure
+        if ax_dict is None:
+            fig, ax = plt.subplots(figsize=(13, 7))
+        else:
+            ax = ax_dict[fid]
+            fig = ax.get_figure()
+    
+        # -------- STYLE --------
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+    
+        # Clean spines
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#B0B0B0")
+        ax.spines["bottom"].set_color("#B0B0B0")
+        ax.spines["left"].set_linewidth(0.8)
+        ax.spines["bottom"].set_linewidth(0.8)
+    
+        # Softer grid
+        ax.grid(True, axis="y", linestyle="--", linewidth=0.7, alpha=0.5)
+        ax.grid(True, axis="x", linestyle="--", linewidth=0.5, alpha=0.25)
+    
+        # Tick styling
+        ax.tick_params(axis="x", labelsize=10, rotation=30)
+        ax.tick_params(axis="y", labelsize=10)
+    
+        if len(cols_to_plot) == 1:
+            ax.plot(
+                df["acq_date"],
+                df[cols_to_plot[0]],
+                marker="o",
+                markersize=6,
+                linewidth=2.2,
+                color="forestgreen",
+                markerfacecolor="white",
+                markeredgecolor="forestgreen",
+                markeredgewidth=1.5
+            )
+        else:
+            ax.errorbar(
+                df["acq_date"],
+                df[cols_to_plot[0]],
+                yerr=df[cols_to_plot[1]],
+                fmt="o-",
+                color="forestgreen",
+                linewidth=2.2,
+                markersize=6,
+                markerfacecolor="white",
+                markeredgecolor="forestgreen",
+                markeredgewidth=1.5,
+                ecolor="dimgray",
+                elinewidth=1.0,
+                capsize=0,
+                alpha=0.95
+            )
+    
+        # Labels and title
+        ax.set_ylabel(band_to_plot, fontsize=12, fontweight="semibold")
+        ax.set_xlabel("Acquisition date", fontsize=12, fontweight="semibold")
+        ax.set_title(
+            f"Parcel {fid} — {band_to_plot} time series",
+            fontsize=14,
+            fontweight="bold",
+            pad=14
+        )
+    
+        # Date formatting
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    
+        # Add a little vertical padding
+        y = df[cols_to_plot[0]].dropna()
+        if not y.empty:
+            ymin = y.min()
+            ymax = y.max()
+            yrange = ymax - ymin
+    
+            if yrange == 0:
+                pad = max(abs(ymin) * 0.05, 0.05)
+            else:
+                pad = yrange * 0.12
+    
+            ax.set_ylim(ymin - pad, ymax + pad)
+    
+        ax.margins(x=0.02)
+        fig.tight_layout()
+        fig.autofmt_xdate()
+    
+        if to_file:
+            fig.savefig(f"{output_folder}/{fid}_{band_to_plot}.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+    
+        return fig, ax

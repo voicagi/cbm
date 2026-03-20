@@ -6,6 +6,8 @@ Created on Wed Jan 21 09:41:40 2026
 """
 #%% Import Libraries
 import geopandas as gpd
+import tempfile
+import zipfile
 from shapely.geometry import box, shape
 import os
 import shutil
@@ -37,6 +39,53 @@ import uuid
 from datetime import datetime
 
 
+def load_vector_dataset(file_path):
+    """
+    Load a vector dataset from GeoJSON, GPKG, KML, Shapefile, or ZIP shapefile.
+    Returns a GeoDataFrame.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext in [".geojson", ".json", ".gpkg", ".shp"]:
+        gdf = gpd.read_file(file_path)
+
+    elif ext == ".kml":
+        gdf = gpd.read_file(file_path, driver="KML")
+
+    elif ext == ".zip":
+        tmpdir = tempfile.mkdtemp(prefix="vector_upload_")
+        with zipfile.ZipFile(file_path, "r") as zf:
+            zf.extractall(tmpdir)
+
+        shp_files = []
+        for root, _, files in os.walk(tmpdir):
+            for f in files:
+                if f.lower().endswith(".shp"):
+                    shp_files.append(os.path.join(root, f))
+
+        if not shp_files:
+            raise ValueError("ZIP file does not contain any .shp file.")
+
+        if len(shp_files) > 1:
+            raise ValueError(
+                f"ZIP file contains multiple shapefiles: {shp_files}. "
+                "Please upload a ZIP with only one shapefile."
+            )
+
+        gdf = gpd.read_file(shp_files[0])
+
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+    if gdf.empty:
+        raise ValueError("The uploaded dataset is empty.")
+
+    if gdf.crs is None:
+        raise ValueError("The uploaded dataset has no CRS defined.")
+
+    return gdf
+
+
 def _safe_stem(path_or_name: str) -> str:
     return os.path.splitext(os.path.basename(path_or_name))[0]
 
@@ -57,7 +106,7 @@ import ncdf_graph_utils as ngu
 
 
 #%% support functions
-def split_extent(gdf : gpd.GeoDataFrame, max_size : int = 10000) -> list :
+def split_extent(gdf : gpd.GeoDataFrame, max_size : int = 50000) -> list :
     """
     Split the original data frame in a list gdfs with with a specified maximum
     extent
@@ -229,15 +278,18 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
     filename_prefix = f"S2_extract_{start_date}_{end_date}_parcelid"
 
     subsets = split_extent(gdf_extent)
+    total_subsets = len(subsets)
+    print(f"Processing {total_subsets} subset(s)...")
 
-    for index, subset in enumerate(subsets):
-        
-        #creating datacube -  S2 bands
+    for subset_idx, subset in enumerate(subsets, start=1):
+    
+        print(f"\n▶ Processing subset {subset_idx}/{total_subsets} ({len(subset)} polygon(s))")
+    
+        # creating datacube - S2 bands
         subset = subset.to_crs(epsg=4326)
         spatial_extent = get_spatial_extent(subset)
     
         # list of bands to be extracted
-        # bands = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12", "SCL"]
         bands = ["B02", "B03", "B04", "B08", "B11", "SCL"]
     
         s2_bands = connection.load_collection(
@@ -248,46 +300,54 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
             max_cloud_cover=50
         )
     
-        #cloud masking
+        # cloud masking
         scl = s2_bands.band("SCL")
-        # cloud_mask = (scl == 0) | (scl == 1)
-        cloud_mask = (scl == 0) | (scl == 1) | (scl == 3) | (scl == 8) | (scl == 9) | (scl == 11)
+        cloud_mask = (
+            (scl == 0) | (scl == 1) | (scl == 3) |
+            (scl == 8) | (scl == 9) | (scl == 11)
+        )
     
         cloud_mask = cloud_mask.resample_cube_spatial(s2_bands)
         s2_bands_masked = s2_bands.mask(cloud_mask)
-
-        #loading the dataset o json - for the spatial filter
-        features = json.loads(subset.to_json())
-
-        #spatial filter - using only the pixels intersecting the polygons
-        s2_bands_masked = s2_bands.filter_spatial(features)
-
-        #adding NDVI index
-        indices = append_indices(s2_bands_masked,
-                                 indices=["NDVI"],
-                                 platform="SENTINEL2")
     
-        #creating the job for server execution 
+        # loading the dataset to json - for the spatial filter
+        features = json.loads(subset.to_json())
+    
+        # spatial filter - using only the pixels intersecting the polygons
+        s2_bands_masked = s2_bands_masked.filter_spatial(features)
+    
+        # adding NDVI index
+        indices = append_indices(
+            s2_bands_masked,
+            indices=["NDVI"],
+            platform="SENTINEL2"
+        )
+    
+        # creating the job for server execution
         job = indices.create_job(
             title="S2 bands and NDVI",
             description="Sentinel-2 L2A bands and NDVI",
             out_format="netCDF",
-            filename_prefix=filename_prefix, 
+            filename_prefix=filename_prefix,
             feature_id_property=id_column,
             sample_by_feature=True,
         )
     
-        #excuting the job and saving the results as NetCDF
-    
+        # executing the job and saving the results as NetCDF
         from rich.console import Console
         console = Console(force_jupyter=True)
     
         for attempt in range(1, max_retries + 1):
             last_message = {"value": None}
-
+    
             try:
-                with console.status("Submitting job...", spinner="dots") as status:
-
+                print(f"   ↳ Attempt {attempt}/{max_retries}")
+    
+                with console.status(
+                    f"Subset {subset_idx}/{total_subsets}: submitting job...",
+                    spinner="dots"
+                ) as status:
+    
                     def custom_print(raw_message):
                         try:
                             elapsed_time = raw_message.split()[0]
@@ -295,43 +355,60 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
                         except Exception:
                             elapsed_time = ""
                             job_id = "unknown"
-
+    
                         if "start" in raw_message:
-                            message = f"🚀 Job submitted and starting. ID: {job_id}."
+                            message = (
+                                f"🚀 Subset {subset_idx}/{total_subsets}: "
+                                f"job submitted and starting. ID: {job_id}."
+                            )
                         elif "created" in raw_message:
-                            message = f"🚀 Job created. ID: {job_id}."
+                            message = (
+                                f"🚀 Subset {subset_idx}/{total_subsets}: "
+                                f"job created. ID: {job_id}."
+                            )
                         elif "queued" in raw_message:
-                            message = f"⏳ [{elapsed_time}] Job (ID: {job_id}) is waiting in the queue. Please wait."
+                            message = (
+                                f"⏳ Subset {subset_idx}/{total_subsets} "
+                                f"[{elapsed_time}] Job (ID: {job_id}) is waiting in the queue."
+                            )
                         elif "running" in raw_message:
-                            message = f"⚙️ [{elapsed_time}] Job (ID: {job_id}) is now running. Please wait."
+                            message = (
+                                f"⚙️ Subset {subset_idx}/{total_subsets} "
+                                f"[{elapsed_time}] Job (ID: {job_id}) is now running."
+                            )
                         elif "finished" in raw_message:
-                            message = f"✅ [{elapsed_time}] Job (ID: {job_id}) has succesfully finished."
+                            message = (
+                                f"✅ Subset {subset_idx}/{total_subsets} "
+                                f"[{elapsed_time}] Job (ID: {job_id}) has successfully finished."
+                            )
                         else:
-                            message = raw_message
-
+                            message = f"Subset {subset_idx}/{total_subsets}: {raw_message}"
+    
                         last_message["value"] = message
                         status.update(message)
-
+    
                     job.start_and_wait(print=custom_print)
-
+    
                 if last_message["value"] is not None:
                     print(last_message["value"])
-
+    
                 job_status = job.status()
                 if job_status == "finished":
                     job.get_results().download_files(output_folder)
+                    remaining = total_subsets - subset_idx
+                    print(f"✅ Finished subset {subset_idx}/{total_subsets}. Remaining: {remaining}")
                     break
                 else:
                     raise RuntimeError(f"Job ended with status '{job_status}'")
-
+    
             except Exception as e:
-                print(f"job failed (attempt {attempt}/{max_retries}): {e}")
-
+                print(f"❌ Subset {subset_idx}/{total_subsets} failed (attempt {attempt}/{max_retries}): {e}")
+    
                 if attempt < max_retries:
-                    print(f"retrying in {wait_seconds} seconds...")
+                    print(f"   ↳ Retrying in {wait_seconds} seconds...")
                     time.sleep(wait_seconds)
                 else:
-                    print("job permanently failed after 3 retries.")
+                    print(f"❌ Subset {subset_idx}/{total_subsets} permanently failed after {max_retries} retries.")
 
 def download_netcdf_ext(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_column : str, \
                         start_date : str, end_date : str, connection ) :
@@ -539,9 +616,9 @@ class OpenEODashboard(widgets.VBox):
 
         # 2. Initialize UI Components
         self.uploader = widgets.FileUpload(
-            accept='.geojson', 
+            accept='.geojson,.json,.gpkg,.kml,.zip', 
             multiple=False, 
-            description="Select GeoJSON",
+            description="Select dataset",
             layout=widgets.Layout(width='250px'),
             style={'description_width': 'initial'}
         )
@@ -657,8 +734,8 @@ class OpenEODashboard(widgets.VBox):
         if len(content) > MAX_BYTES:
             raise ValueError(f"❌ File size exceeds the maximum limit of {MAX_BYTES/(1024*1024):.0f} MB.")
 
-        if not filename.lower().endswith(".geojson"):
-            raise ValueError("❌ Invalid file format. Please upload a .geojson file.")
+        #if not filename.lower().endswith(".geojson"):
+        #    raise ValueError("❌ Invalid file format. Please upload a .geojson file.")
 
         return filename, content
     
@@ -696,11 +773,132 @@ class OpenEODashboard(widgets.VBox):
                 raise ValueError(f"❌ Feature {i} has geometry type '{gtype}'. Allowed: {sorted(allowed)}")
 
         return obj
+
+    def _validate_vector_dataset(self, file_name: str, content: bytes):
+        """
+        Validate an uploaded vector dataset and return it as a GeoDataFrame.
+    
+        Supported formats:
+          - .geojson / .json
+          - .gpkg
+          - .kml
+          - .zip   (ZIP containing exactly one shapefile)
+          - .shp   (only if somehow already available as a complete file on disk; ZIP is preferred)
+    
+        Notes:
+          - For shapefiles, prefer uploading a ZIP containing .shp, .shx, .dbf, and .prj.
+          - Returns a GeoDataFrame instead of raw JSON.
+        """
+        ext = os.path.splitext(file_name)[1].lower()
+    
+        tmpdir = tempfile.mkdtemp(prefix="uploaded_vector_")
+        input_path = os.path.join(tmpdir, file_name)
+    
+        # Save uploaded bytes to disk
+        with open(input_path, "wb") as f:
+            f.write(content)
+    
+        try:
+            # ---- Load according to format ----
+            if ext in {".geojson", ".json"}:
+                # Optional: keep explicit JSON validation for clearer error messages
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise ValueError("❌ File encoding error. Please ensure the file is UTF-8 encoded.")
+    
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"❌ Invalid JSON: {e}")
+    
+                if obj.get("type") != "FeatureCollection":
+                    raise ValueError("❌ GeoJSON must be a FeatureCollection.")
+    
+                feats = obj.get("features")
+                if not isinstance(feats, list) or len(feats) == 0:
+                    raise ValueError("❌ GeoJSON has no features.")
+    
+                gdf = gpd.read_file(input_path)
+    
+            elif ext == ".gpkg":
+                gdf = gpd.read_file(input_path)
+    
+            elif ext == ".kml":
+                gdf = gpd.read_file(input_path, driver="KML")
+    
+            elif ext == ".zip":
+                extract_dir = os.path.join(tmpdir, "unzipped")
+                os.makedirs(extract_dir, exist_ok=True)
+    
+                try:
+                    with zipfile.ZipFile(input_path, "r") as zf:
+                        zf.extractall(extract_dir)
+                except zipfile.BadZipFile:
+                    raise ValueError("❌ Invalid ZIP file.")
+    
+                shp_files = []
+                for root, _, files in os.walk(extract_dir):
+                    for fn in files:
+                        if fn.lower().endswith(".shp"):
+                            shp_files.append(os.path.join(root, fn))
+    
+                if not shp_files:
+                    raise ValueError("❌ ZIP file does not contain any .shp file.")
+    
+                if len(shp_files) > 1:
+                    raise ValueError("❌ ZIP file contains multiple shapefiles. Please provide only one shapefile per ZIP.")
+    
+                gdf = gpd.read_file(shp_files[0])
+    
+            elif ext == ".shp":
+                raise ValueError("❌ Please upload shapefiles as a ZIP containing .shp, .shx, .dbf, and .prj.")
+    
+            else:
+                raise ValueError(f"❌ Unsupported file format '{ext}'. Allowed: .geojson, .json, .gpkg, .kml, .zip")
+    
+            # ---- Generic validation ----
+            if gdf is None or gdf.empty:
+                raise ValueError("❌ The uploaded dataset has no features.")
+    
+            if "geometry" not in gdf.columns:
+                raise ValueError("❌ The uploaded dataset has no geometry column.")
+    
+            gdf = gdf[gdf.geometry.notnull()].copy()
+            gdf = gdf[~gdf.geometry.is_empty].copy()
+    
+            if gdf.empty:
+                raise ValueError("❌ All geometries are null or empty.")
+    
+            MAX_FEATURES = self.geojson_max_features
+            if len(gdf) > MAX_FEATURES:
+                raise ValueError(f"❌ Too many features ({len(gdf)}). Limit is {MAX_FEATURES}.")
+    
+            if gdf.crs is None:
+                raise ValueError("❌ The uploaded dataset has no CRS defined.")
+    
+            allowed = {"Polygon", "MultiPolygon"}
+            geom_types = gdf.geometry.geom_type
+    
+            invalid = [(i, gt) for i, gt in zip(gdf.index, geom_types) if gt not in allowed]
+            if invalid:
+                i, gt = invalid[0]
+                raise ValueError(
+                    f"❌ Feature {i} has geometry type '{gt}'. Allowed: {sorted(allowed)}"
+                )
+    
+            return gdf
+    
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"❌ Could not read the uploaded dataset: {e}")
     
     def _load_and_validate_gdf(self, content: bytes) -> gpd.GeoDataFrame:
         """Load with GeoPandas + minimal geometry/CRS sanity checks."""
         try:
-            gdf = gpd.read_file(io.BytesIO(content))
+            #gdf = gpd.read_file(io.BytesIO(content))
+            gdf = load_vector_dataset(dataset_path)
         except Exception as e:
             raise ValueError(f"❌ Could not read GeoJSON with GeoPandas: {e}")
 
@@ -750,45 +948,44 @@ class OpenEODashboard(widgets.VBox):
     def _on_upload(self, change):
         with self.msg_output:
             clear_output()
-
+    
             self._ok_upload = False
             self.gdf = None
             self.upload_filename = None
             self.upload_hash = None
             self.dataset_tag = None
-
+    
             try:
                 filename, content = self._read_upload_bytes()
                 self.upload_filename = filename
                 self.upload_hash = _build_dataset_hash(content)
-
-                # parse + basic structure checks (you don’t use obj yet, but it’s still a good early gate)
-                _ = self._validate_geojson_text(content)
-
-                # load + gdf checks
-                gdf = self._load_and_validate_gdf(content)
-
+    
+                # validate + load dataset
+                gdf = self._validate_vector_dataset(filename, content)
+    
                 self.gdf = gdf
-
+    
                 # Populate ID dropdown (no validation yet)
                 columns = [c for c in self.gdf.columns if c != "geometry"]
                 if len(columns) == 0:
-                    raise ValueError("❌ No attribute columns found (need at least one non-geometry column for Parcel ID).")
-
+                    raise ValueError(
+                        "❌ No attribute columns found (need at least one non-geometry column for Parcel ID)."
+                    )
+    
                 self.col_dropdown.options = columns
                 self.col_dropdown.disabled = False
-
+    
                 print(f"✅ Loaded {len(self.gdf)} parcels. Select time window and ID column to begin.")
                 self._ok_upload = True
-
+    
             except ValueError as e:
                 print(str(e))
                 self._ok_upload = False
-
+    
             except Exception as e:
                 print(f"❌ Error while processing upload: {e}")
                 self._ok_upload = False
-
+    
             finally:
                 self._update_run_button()
 
@@ -921,7 +1118,7 @@ class OpenEODashboard(widgets.VBox):
                 self.output_folder = output_folder
 
                 print(f"🗺️ Processing file: {filename}...")
-                print(f"Dataset hash: {upload_hash}")
+                #print(f"Dataset hash: {upload_hash}")
                 print(f"Date range: {start_str} → {end_str}")
                 
                 # Call your external function
@@ -1365,8 +1562,37 @@ class DrawPolygonDashboard(widgets.VBox):
             self._set_running_state(True)
 
             try:
+                # Minimal fix: when the user edits polygons, self.features_fc can still
+                # contain the pre-edit geometry. Right before processing, rebuild the
+                # current features from the DrawControl state and preserve aoi_id when possible.
+                current_features = self.features_fc
+                try:
+                    dc_data = getattr(self.dc, "data", None)
+                    if dc_data:
+                        rebuilt = []
+                        previous_features = list(self.features_fc.get("features", []))
+
+                        for idx, feat in enumerate(dc_data):
+                            props = dict(feat.get("properties", {}) or {})
+                            if "aoi_id" not in props and idx < len(previous_features):
+                                prev_props = previous_features[idx].get("properties", {}) or {}
+                                if "aoi_id" in prev_props:
+                                    props["aoi_id"] = prev_props["aoi_id"]
+
+                            rebuilt.append({
+                                "type": "Feature",
+                                "geometry": feat.get("geometry"),
+                                "properties": props,
+                            })
+
+                        if rebuilt:
+                            current_features = {"type": "FeatureCollection", "features": rebuilt}
+                            self.features_fc = current_features
+                except Exception:
+                    pass
+
                 # Convert current drawn polygons to GeoDataFrame
-                self.gdf = features_fc_to_gdf(self.features_fc)
+                self.gdf = features_fc_to_gdf(current_features)
 
                 # Dates for API
                 start_api = self.start_date.value.strftime("%Y-%m-%d")
@@ -1389,10 +1615,10 @@ class DrawPolygonDashboard(widgets.VBox):
                 self.geojson_path = os.path.join(self.output_folder, "polygons.geojson")
                 self.gdf.to_file(self.geojson_path, driver="GeoJSON")
 
-                print(f"Session ID: {self.session_id}")
-                print(f"Run tag: {run_tag}")
-                print(f"Saved polygons: {self.geojson_path}")
-                print(f"Running process for {len(self.gdf)} polygon(s)...")
+                #print(f"Session ID: {self.session_id}")
+                #print(f"Run tag: {run_tag}")
+                #print(f"Saved polygons: {self.geojson_path}")
+                #print(f"Running process for {len(self.gdf)} polygon(s)...")
 
                 # Download NetCDFs for the CURRENT polygons and CURRENT dates
                 download_netcdf(
@@ -1444,12 +1670,23 @@ class MapAndPlotWidget(widgets.VBox):
         self.netcdf_prefix = f"S2_extract_{start_date}_{end_date}_parcelid_"
         
         # Reuse existing map if provided, otherwise create one
+        self._reusing_existing_map = False
+        self._from_draw_dashboard = False
+
         if hasattr(openDashboard, "map"):
             self.m = openDashboard.map
+            self._reusing_existing_map = True
         elif hasattr(openDashboard, "m"):
             self.m = openDashboard.m
+            self._reusing_existing_map = True
         else:
             self.m = leafmap.Map(center=[0, 0], zoom=2)
+
+        # When the viewer is opened from the polygon-drawing workflow,
+        # keep the current map state as-is. This avoids re-adding the dataset
+        # layer and re-zooming after processing, which can re-show stale shapes
+        # from a previous edit state.
+        self._from_draw_dashboard = isinstance(openDashboard, DrawPolygonDashboard)
 
         self._id_ok = True
         self._plot_type_ok = False
@@ -1529,6 +1766,12 @@ class MapAndPlotWidget(widgets.VBox):
         ndvi_dir = os.path.join(self.output_folder, 'ndvi')
         os.makedirs(ndvi_dir, exist_ok=True)
         return os.path.join(ndvi_dir, f"{parcel_id}_NDVI_{self.dataset_tag}.png")
+
+    def _get_line_plot_path(self, parcel_id, band_name):
+        safe_band = str(band_name).replace(' ', '_').replace('/', '-')
+        plots_dir = os.path.join(self.output_folder, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        return os.path.join(plots_dir, f"{parcel_id}_{safe_band}_{self.dataset_tag}.png")
 
     def _get_cview_png_path(self, parcel_id, suffix):
         cview_dir = os.path.join(self.output_folder, 'cview')
@@ -1677,30 +1920,61 @@ class MapAndPlotWidget(widgets.VBox):
             fig, ax = out
             plt.show()
             plt.close(fig)
+    def _gdf_to_clean_geojson(self, gdf):
+        geojson = json.loads(gdf.to_json())
+    
+        reserved_props = {
+            "style",
+            "hover_style",
+            "styleUrl",
+            "icon",
+            "icons",
+        }
+    
+        for feature in geojson.get("features", []):
+            props = feature.get("properties", {})
+            if not isinstance(props, dict):
+                feature["properties"] = {}
+                continue
+    
+            for key in list(props.keys()):
+                if key in reserved_props:
+                    del props[key]
+    
+        return geojson
 
     def _on_start(self):
         """Initialize map layers and interactions"""
         with self.output_log:
             self.gdf = self.gdf.to_crs(epsg=4326)
-
+    
+            # In the draw-polygon workflow we reuse the same map that already
+            # contains the user polygons. Do not add the dataset again and do
+            # not zoom again after processing, otherwise the pre-edit and
+            # post-edit shapes can both end up visible.
+            if self._reusing_existing_map and self._from_draw_dashboard:
+                return
+    
             style = {'fillOpacity': 0.3, 'weight': 1, 'color': '#3388ff'}
             hover_style = {'fillOpacity': 0.6, 'color': 'red'}
-
+    
             old_layer = self.m.find_layer("Parcels")
             if old_layer:
                 self.m.remove_layer(old_layer)
-             
+    
+            clean_geojson = self._gdf_to_clean_geojson(self.gdf)
+    
             self.m.add_geojson(
-                self.gdf.__geo_interface__, 
+                clean_geojson,
                 layer_name="Parcels",
                 style=style,
                 hover_style=hover_style
             )
-                 
+    
             layer = self.m.find_layer("Parcels")
             if layer:
                 layer.on_click(self._handle_click_on_map)
-
+    
             self.m.zoom_to_gdf(self.gdf)
 
     def _set_dropdown_silently(self, value):
@@ -1782,6 +2056,7 @@ class MapAndPlotWidget(widgets.VBox):
             return None
     
         parcel_id = self.id_dropdown.value
+        band_name = self.dd_plot_param.value
     
         output_path = self.output_folder
         netcdf_path = self._get_netcdf_path(parcel_id)
@@ -1795,11 +2070,15 @@ class MapAndPlotWidget(widgets.VBox):
         if not os.path.exists(csv_filename):
             self._compute_stats_csv(parcel_id, netcdf_path, csv_filename)
     
-        fig, ax = cgu.plot_csv_parcel(
+        fig, ax = cgu.plot_csv_parcel_std(
             csv_filename,
-            band_to_plot=self.dd_plot_param.value,
+            band_to_plot=band_name,
             to_file=False
         )
+
+        plot_png = self._get_line_plot_path(parcel_id, band_name)
+        if (fig is not None) and (not os.path.exists(plot_png)):
+            fig.savefig(plot_png, bbox_inches='tight', dpi=100)
     
         return fig, ax
 
@@ -1881,7 +2160,7 @@ class MapAndPlotWidget(widgets.VBox):
                 crs_wkt = ds["crs"].attrs.get("crs_wkt")
                 ds = ds.rio.write_crs(crs_wkt)
     
-                print("Computing Calendar View - Be patient")
+                print("Computing Calendar View - Please be patient")
                 if is_scatter:
                     fig, ax = ngu.calendar_view_half_weekly_scatter(
                         ds,
@@ -1907,6 +2186,8 @@ class MapAndPlotWidget(widgets.VBox):
             with open(cview_filename, 'rb') as f:
                 fig = pickle.load(f)
             ax = fig.axes
+            if (fig is not None) and (not os.path.exists(cview_png)):
+                fig.savefig(cview_png, dpi=100, bbox_inches='tight')
     
         return fig, ax
 
