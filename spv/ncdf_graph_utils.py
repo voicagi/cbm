@@ -208,52 +208,73 @@ def calendar_view_half_weekly(ds, parcel = None, name_cols = None, band_list = N
         act_col = plot_utils.get_half_weekly_column(acq_date, year_months_dict_half_weekly)
         act_row = plot_utils.get_current_row(acq_date, dates)
         
-        if undefined and acq_date > np.datetime64("2022-01-25") :
-            # If the lut was undefined, apply 'date' correction
-            lut =  {'B08' : [2200, 6700],
-                    'B11' : [1800, 5100],
-                    'B04' : [1150, 3800]}
-        else :
+        if undefined and acq_date > np.datetime64("2022-01-25"):
+            lut = {'B08': [2200, 6700],
+                   'B11': [1800, 5100],
+                   'B04': [1150, 3800]}
+        else:
             lut = stretch_table
         
         if act_col > 0:
             
             # Identify the data related to a specific date
-            data = ds.isel(t = np.argwhere(ds.t.values == acq_date).flatten()[0])
+            data = ds.isel(t=np.argwhere(ds.t.values == acq_date).flatten()[0])
             
-            if parcel is not None :
+            if parcel is not None:
                 parcel = parcel.to_crs(data.rio.crs)
-            
-            a[act_row][act_col].set_title(np.datetime_as_string(acq_date, unit='D'), verticalalignment='center', fontdict={'fontsize': 8, 'fontweight': 'medium'})
+
+            date_label = np.datetime_as_string(acq_date, unit='D')
         
             # Build the extent
-            extent = (min(ds.x.values) - np.mean(abs(np.diff(ds.x.values))) / 2, # left value
-                      max(ds.x.values) + np.mean(abs(np.diff(ds.x.values))) / 2, # right value
-                      min(ds.y.values) - np.mean(abs(np.diff(ds.y.values))) / 2, # bottom value
-                      max(ds.y.values) + np.mean(abs(np.diff(ds.y.values))) / 2)  # top value
+            extent = (
+                min(ds.x.values) - np.mean(abs(np.diff(ds.x.values))) / 2,
+                max(ds.x.values) + np.mean(abs(np.diff(ds.x.values))) / 2,
+                min(ds.y.values) - np.mean(abs(np.diff(ds.y.values))) / 2,
+                max(ds.y.values) + np.mean(abs(np.diff(ds.y.values))) / 2
+            )
             
-            if len(band_list) == 3 :
+            if len(band_list) == 3:
             
-                # Now read the three bands
                 band_red = data[band_list[0]].values    
                 band_green = data[band_list[1]].values
                 band_blue = data[band_list[2]].values    
                 
-                # Check for boundary conditions
-                check_boundary_img_conditions( band_red, band_green, band_blue )
+                check_boundary_img_conditions(band_red, band_green, band_blue)
                 
-                # Stack and stretch the three bands
-                rgb_compo = plot_utils.stretch_and_stack(band_red, band_green, band_blue, lut)
+                rgb_compo = plot_utils.stretch_and_stack(
+                    band_red, band_green, band_blue, lut
+                )
                                     
-                a[act_row][act_col].imshow(rgb_compo, extent = extent)
-            else :
+                a[act_row][act_col].imshow(rgb_compo, extent=extent)
+            else:
                 band = data[band_list[0]].values
                 
-                #N.B.: vmin and vmax needs to be carefully checked since not all the indexes are between such ranges
-                a[act_row][act_col].imshow(band, extent = extent, cmap = 'RdYlGn', vmin = 0, vmax=1)
+                a[act_row][act_col].imshow(
+                    band, extent=extent, cmap='RdYlGn', vmin=0, vmax=1
+                )
 
-            if parcel is not None :
-                parcel.plot(ax=a[act_row][act_col], facecolor='none', edgecolor=vector_color)
+            if parcel is not None:
+                parcel.plot(
+                    ax=a[act_row][act_col],
+                    facecolor='none',
+                    edgecolor=vector_color
+                )
+
+            # Date label inside the image, close to the bottom
+            a[act_row][act_col].text(
+                0.5, 0.03, date_label,
+                transform=a[act_row][act_col].transAxes,
+                fontsize=8,
+                fontweight='medium',
+                ha='center',
+                va='bottom',
+                bbox=dict(
+                    boxstyle='round,pad=0.2',
+                    facecolor='white',
+                    alpha=0.65,
+                    edgecolor='none'
+                )
+            )
     
     return fig, a
 

@@ -1615,10 +1615,10 @@ class DrawPolygonDashboard(widgets.VBox):
                 self.geojson_path = os.path.join(self.output_folder, "polygons.geojson")
                 self.gdf.to_file(self.geojson_path, driver="GeoJSON")
 
-                print(f"Session ID: {self.session_id}")
-                print(f"Run tag: {run_tag}")
-                print(f"Saved polygons: {self.geojson_path}")
-                print(f"Running process for {len(self.gdf)} polygon(s)...")
+                #print(f"Session ID: {self.session_id}")
+                #print(f"Run tag: {run_tag}")
+                #print(f"Saved polygons: {self.geojson_path}")
+                #print(f"Running process for {len(self.gdf)} polygon(s)...")
 
                 # Download NetCDFs for the CURRENT polygons and CURRENT dates
                 download_netcdf(
@@ -2160,7 +2160,7 @@ class MapAndPlotWidget(widgets.VBox):
                 crs_wkt = ds["crs"].attrs.get("crs_wkt")
                 ds = ds.rio.write_crs(crs_wkt)
     
-                print("Computing Calendar View - Be patient")
+                print("Computing Calendar View - Please be patient")
                 if is_scatter:
                     fig, ax = ngu.calendar_view_half_weekly_scatter(
                         ds,
