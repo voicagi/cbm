@@ -1682,6 +1682,9 @@ class MapAndPlotWidget(widgets.VBox):
         else:
             self.m = leafmap.Map(center=[0, 0], zoom=2)
 
+        self.labels_group = LayerGroup(layers=[])
+        self.m.add_layer(self.labels_group)
+
         # When the viewer is opened from the polygon-drawing workflow,
         # keep the current map state as-is. This avoids re-adding the dataset
         # layer and re-zooming after processing, which can re-show stale shapes
@@ -1735,6 +1738,36 @@ class MapAndPlotWidget(widgets.VBox):
             self.dd_plot_param,
             self.btn_display
         ])
+
+        self.basemap_selector = widgets.Dropdown(
+            options=[
+                ("OpenStreetMap", "OpenStreetMap.Mapnik"),
+                ("Esri World Imagery", "Esri.WorldImagery"),
+                ("OpenTopoMap", "OpenTopoMap"),
+                ("CartoDB Positron", "CartoDB.Positron"),
+                ("CartoDB DarkMatter", "CartoDB.DarkMatter"),
+            ],
+            value="OpenStreetMap.Mapnik",
+            description="Basemap:",
+            style={"description_width": "initial"},
+            layout=widgets.Layout(width="270px")
+        )
+        
+        self.basemap_selector.observe(self._on_basemap_change, names="value")
+        
+        self.basemap_box = widgets.VBox(
+            [self.basemap_selector],
+            layout=widgets.Layout(
+                padding="6px",
+                width="290px"
+            )
+        )
+        
+        self.basemap_control = WidgetControl(
+            widget=self.basemap_box,
+            position="topright"
+        )
+        self.m.add_control(self.basemap_control)        
         
         self.children = [
             self.m,
@@ -1754,6 +1787,36 @@ class MapAndPlotWidget(widgets.VBox):
         # Initialize map layers
         self._on_start()
 
+    def add_plain_number_label(self, lat, lon, text):
+        icon = DivIcon(
+            html=f"""
+            <div style="
+                color: #000;
+                font-size: 16px;
+                font-weight: 700;
+                line-height: 1;
+                text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff,
+                             -1px  1px 0 #fff, 1px  1px 0 #fff;
+                pointer-events: none;
+            ">{text}</div>
+            """,
+            icon_size=(0, 0),
+            icon_anchor=(0, 0),
+        )
+        mk = Marker(location=(lat, lon), icon=icon)
+        self.labels_group.layers = tuple(list(self.labels_group.layers) + [mk])
+    
+    def rebuild_labels(self):
+        self.labels_group.layers = tuple()
+    
+        for _, row in self.gdf.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+    
+            c = geom.centroid
+            parcel_id = row[self.id_column]
+            self.add_plain_number_label(c.y, c.x, str(parcel_id))
     def _get_netcdf_path(self, parcel_id):
         return os.path.join(self.output_folder, f"{self.netcdf_prefix}{parcel_id}.nc")
 
@@ -1813,6 +1876,35 @@ class MapAndPlotWidget(widgets.VBox):
             subset = self.gdf[self.gdf[self.id_column] == selected_val]
             if not subset.empty:
                 self.m.zoom_to_gdf(subset)
+    def _on_basemap_change(self, change):
+        if change["name"] != "value":
+            return
+    
+        basemap_name = change["new"]
+    
+        try:
+            known_basemaps = {
+                "OpenStreetMap.Mapnik",
+                "Esri.WorldImagery",
+                "OpenTopoMap",
+                "CartoDB.Positron",
+                "CartoDB.DarkMatter",
+            }
+    
+            to_remove = []
+            for layer in self.m.layers:
+                layer_name = getattr(layer, "name", "")
+                if layer_name in known_basemaps:
+                    to_remove.append(layer)
+    
+            for layer in to_remove:
+                self.m.remove_layer(layer)
+    
+            self.m.add_basemap(basemap_name)
+    
+        except Exception as e:
+            with self.output_log:
+                print(f"❌ Could not change basemap: {e}")
 
     def _on_plot_type_change(self, change):
         """
@@ -1970,6 +2062,8 @@ class MapAndPlotWidget(widgets.VBox):
                 style=style,
                 hover_style=hover_style
             )
+
+            self.rebuild_labels()
     
             layer = self.m.find_layer("Parcels")
             if layer:
