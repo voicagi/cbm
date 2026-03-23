@@ -88,143 +88,175 @@ def check_boundary_img_conditions( red : np.array, green : np.array, blue : np.a
     np.nan_to_num(blue, copy=False, nan=MAXVAL) 
     
             
-def calendar_view_half_weekly(ds, parcel = None, name_cols = None, band_list = None, \
-                              out_tif_folder_base = "./", 
-                              stretch_table = None, buffer_size_meter = 50, \
-                              vector_color = "black", image_resolution = 100 ) :   
-    
+def calendar_view_half_weekly(ds, parcel=None, name_cols=None, band_list=None,
+                              out_tif_folder_base="./",
+                              stretch_table=None, buffer_size_meter=50,
+                              vector_color="black", image_resolution=100):
+
     """
     Summary :
         Function that generates a calendar view visualization with half weekly display
         for a set of three bands. The function expects either a dataset as loaded from
         a NetCDF file.
-        
+
         Code based on the calendar view function of Csaba Wirnhardt.
-        
+
     Arguments :
         ds - dataset with the different bands extracted from the NetCDF file
-        
+
         parcel - geometry of the parcel
-        
+
         name_cols = list of colums for termining the parcel name/ID
-        
+
         band_list - list of Sentinel-2 bands present in the merged geotiff.
                     This is needed to select the correct bands
-        
+
         stretch_table - dictionary containig 3 keys corresponding to the three bands
                         to plot
-                        
+
             Example:
                 stretch_table = {'B08' : [1200, 5700],
                                  'B11' : [800, 4100],
                                  'B04' : [150, 2800]}
     """
-    if name_cols is None :
+    if name_cols is None:
         parcel_name = "1"
         parcel_id = 1
-    else :
+    else:
         parcel_name, parcel_id = get_parcel_name_and_id(name_cols, parcel)
 
-    if band_list is None :
+    if band_list is None:
         band_list = ["B08", "B11", "B04"]
-        
-    if len(band_list) not in [1, 3] :
+
+    if len(band_list) not in [1, 3]:
         raise Exception("Unsupported number of bands")
-        
+
     # output folder
     output_jpg_folder = out_tif_folder_base
-    
+
     if not os.path.exists(output_jpg_folder):
         os.makedirs(output_jpg_folder)
 
-    # Acquistion dates are supposed to be stored in the t variable 
-    # use uniqe to avoid duplications
+    # Acquisition dates are supposed to be stored in the t variable
     dates = np.unique(ds.t)
-    
-    # Imagettes will be displayed in a matrix, use these function to determine 
-    # the matrix size
+
+    # Imagettes will be displayed in a matrix
     year_months_dict = plot_utils.get_year_months_dict(dates)
     year_months_dict_half_weekly = plot_utils.get_year_months_dict_for_half_weekly(dates)
-    
+
     first_year_month = min(year_months_dict.keys())
     number_of_year_months = plot_utils.get_number_of_rows(dates)
-    
+
     # Determine the number of rows, the number of columns is fixed
     num_rows = number_of_year_months + 1
     num_cols = 9
-    
+
     textstrs = plot_utils.get_current_list_of_months(str(first_year_month), number_of_year_months)
-    
+
     # figure size
-    if parcel is not None :
+    if parcel is not None:
         parcel_extent_ratio = plot_utils.get_parcel_extent_ratio(parcel, buffer_size_meter)
-    else :
+    else:
         parcel_extent_ratio = len(ds.y) / len(ds.x)
-        
-    fig_size_x = 16
-    fig_size_y = fig_size_x * (number_of_year_months / (num_cols-1)) * parcel_extent_ratio
-    
+
+    # Slightly larger figure to make each image bigger
+    fig_size_x = 18
+    fig_size_y = fig_size_x * (number_of_year_months / (num_cols - 1)) * parcel_extent_ratio * 1.05
+
     fig, a = plt.subplots(num_rows, num_cols, figsize=(fig_size_x, fig_size_y))
 
-    # we remove the axes showing the coordinates which is anyway meaningless
-    for i in range(0, num_rows):
-        for j in range(0, num_cols):
+    # Reduce space between panels: smaller gaps, larger images
+    fig.subplots_adjust(
+        left=0.02,
+        right=0.995,
+        top=0.98,
+        bottom=0.02,
+        wspace=0.015,
+        hspace=0.04
+    )
+
+    # Remove axes
+    for i in range(num_rows):
+        for j in range(num_cols):
             a[i][j].set_axis_off()
 
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
 
-    # plot Year and month names in first columnt
+    # plot Year and month names in first column
     output_row = 1
     for textstr in textstrs:
-        a[output_row][0].text(0.5, 0.5, textstr, transform=a[output_row][0].transAxes, fontsize=14,
-                verticalalignment='center', bbox=props, horizontalalignment='center')
+        a[output_row][0].text(
+            0.5, 0.5, textstr,
+            transform=a[output_row][0].transAxes,
+            fontsize=14,
+            verticalalignment='center',
+            bbox=props,
+            horizontalalignment='center'
+        )
         output_row += 1
 
     # plot header row
     output_col = 1
-    header_row_textstrs = ["Week\n1A", "Week\n1B", "Week\n2A", "Week\n2B", "Week\n3A", "Week\n3B", "Week\n4A", "Week\n4B",]
+    header_row_textstrs = [
+        "Week\n1A", "Week\n1B", "Week\n2A", "Week\n2B",
+        "Week\n3A", "Week\n3B", "Week\n4A", "Week\n4B"
+    ]
     for textstr in header_row_textstrs:
-        a[0][output_col].text(0.5, 0.5, textstr, transform=a[0][output_col].transAxes, fontsize=14,
-                verticalalignment='center', bbox=props, horizontalalignment='center')
+        a[0][output_col].text(
+            0.5, 0.5, textstr,
+            transform=a[0][output_col].transAxes,
+            fontsize=14,
+            verticalalignment='center',
+            bbox=props,
+            horizontalalignment='center'
+        )
         output_col += 1
-        
+
     info_text = str(parcel_id) + "\n"
-    a[0][0].text(0.5, 0.5, info_text, transform=a[0][0].transAxes, fontsize=10,
-                    verticalalignment='center', horizontalalignment='center')
+    a[0][0].text(
+        0.5, 0.5, info_text,
+        transform=a[0][0].transAxes,
+        fontsize=10,
+        verticalalignment='center',
+        horizontalalignment='center'
+    )
 
     # Check if the lut for band stretching has been defined
-    # If not allocate it
     undefined = False
-    if (stretch_table is None) and (len(band_list) == 3) :
-        
-        stretch_table = {'B08' : [1200, 5700],
-                         'B11' : [800, 4100],
-                         'B04' : [150, 2800]}
+    if (stretch_table is None) and (len(band_list) == 3):
+
+        stretch_table = {
+            'B08': [1200, 5700],
+            'B11': [800, 4100],
+            'B04': [150, 2800]
+        }
 
         undefined = True
-        
+
     # Loop on the acquisition dates
     for acq_date in dates:
         act_col = plot_utils.get_half_weekly_column(acq_date, year_months_dict_half_weekly)
         act_row = plot_utils.get_current_row(acq_date, dates)
-        
+
         if undefined and acq_date > np.datetime64("2022-01-25"):
-            lut = {'B08': [2200, 6700],
-                   'B11': [1800, 5100],
-                   'B04': [1150, 3800]}
+            lut = {
+                'B08': [2200, 6700],
+                'B11': [1800, 5100],
+                'B04': [1150, 3800]
+            }
         else:
             lut = stretch_table
-        
+
         if act_col > 0:
-            
+
             # Identify the data related to a specific date
             data = ds.isel(t=np.argwhere(ds.t.values == acq_date).flatten()[0])
-            
+
             if parcel is not None:
                 parcel = parcel.to_crs(data.rio.crs)
 
             date_label = np.datetime_as_string(acq_date, unit='D')
-        
+
             # Build the extent
             extent = (
                 min(ds.x.values) - np.mean(abs(np.diff(ds.x.values))) / 2,
@@ -232,23 +264,24 @@ def calendar_view_half_weekly(ds, parcel = None, name_cols = None, band_list = N
                 min(ds.y.values) - np.mean(abs(np.diff(ds.y.values))) / 2,
                 max(ds.y.values) + np.mean(abs(np.diff(ds.y.values))) / 2
             )
-            
+
             if len(band_list) == 3:
-            
-                band_red = data[band_list[0]].values    
+
+                band_red = data[band_list[0]].values
                 band_green = data[band_list[1]].values
-                band_blue = data[band_list[2]].values    
-                
+                band_blue = data[band_list[2]].values
+
                 check_boundary_img_conditions(band_red, band_green, band_blue)
-                
+
                 rgb_compo = plot_utils.stretch_and_stack(
                     band_red, band_green, band_blue, lut
                 )
-                                    
+
                 a[act_row][act_col].imshow(rgb_compo, extent=extent)
+
             else:
                 band = data[band_list[0]].values
-                
+
                 a[act_row][act_col].imshow(
                     band, extent=extent, cmap='RdYlGn', vmin=0, vmax=1
                 )
@@ -260,22 +293,23 @@ def calendar_view_half_weekly(ds, parcel = None, name_cols = None, band_list = N
                     edgecolor=vector_color
                 )
 
-            # Date label inside the image, close to the bottom
+            # Date label inside the image, very close to bottom edge
             a[act_row][act_col].text(
-                0.5, 0.03, date_label,
+                0.5, -0.024, date_label,
                 transform=a[act_row][act_col].transAxes,
-                fontsize=8,
-                fontweight='medium',
+                fontsize=9.5,
+                fontweight='semibold',
                 ha='center',
-                va='bottom',
+                va='top',
+                clip_on=False,
                 bbox=dict(
-                    boxstyle='round,pad=0.2',
+                    boxstyle='round,pad=0.25',
                     facecolor='white',
-                    alpha=0.65,
-                    edgecolor='none'
+                    alpha=0.9,
+                    edgecolor='#CCCCCC'
                 )
             )
-    
+
     return fig, a
 
 def calendar_view_half_weekly_scatter(ds, parcel = None, name_cols = None, \

@@ -1685,6 +1685,9 @@ class MapAndPlotWidget(widgets.VBox):
         self.labels_group = LayerGroup(layers=[])
         self.m.add_layer(self.labels_group)
 
+        self._refreshing_labels = False
+        self.m.observe(self._on_map_layers_change, names="layers")
+
         # When the viewer is opened from the polygon-drawing workflow,
         # keep the current map state as-is. This avoids re-adding the dataset
         # layer and re-zooming after processing, which can re-show stale shapes
@@ -1806,6 +1809,40 @@ class MapAndPlotWidget(widgets.VBox):
         )
         mk = Marker(location=(lat, lon), icon=icon)
         self.labels_group.layers = tuple(list(self.labels_group.layers) + [mk])
+
+    def refresh_labels_on_top(self):
+        """
+        Rebuild labels and re-add the label layer so labels stay visible
+        after clicks/popups.
+        """
+        try:
+            self.m.remove_layer(self.labels_group)
+        except Exception:
+            pass
+    
+        self.labels_group = LayerGroup(layers=[])
+        self.m.add_layer(self.labels_group)
+        self.rebuild_labels()
+
+    def _on_map_layers_change(self, change):
+        """
+        When the popup is closed and removed from the map, restore the labels
+        so they become visible again.
+        """
+        if self._refreshing_labels:
+            return
+    
+        try:
+            has_popup = any(isinstance(layer, Popup) for layer in self.m.layers)
+        except Exception:
+            return
+    
+        if not has_popup:
+            self._refreshing_labels = True
+            try:
+                self.refresh_labels_on_top()
+            finally:
+                self._refreshing_labels = False
     
     def rebuild_labels(self):
         self.labels_group.layers = tuple()
@@ -2064,6 +2101,13 @@ class MapAndPlotWidget(widgets.VBox):
                 hover_style=hover_style
             )
 
+            try:
+                self.m.remove_layer(self.labels_group)
+            except Exception:
+                pass
+            
+            self.labels_group = LayerGroup(layers=[])
+            self.m.add_layer(self.labels_group)
             self.rebuild_labels()
     
             layer = self.m.find_layer("Parcels")
@@ -2140,6 +2184,11 @@ class MapAndPlotWidget(widgets.VBox):
                 auto_pan=True,                 # pan only (no zoom) to keep popup visible
                 auto_pan_padding=(20, 20),     # keep it away from edges so close button is accessible
             )
+
+            # First refresh labels
+            self.refresh_labels_on_top()
+            
+            # Then add popup as the last layer so it stays visible
             self.m.add_layer(popup)
 
 
