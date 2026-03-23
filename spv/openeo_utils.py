@@ -212,52 +212,107 @@ def features_fc_to_gdf(features_fc, crs="EPSG:4326"):
 
     return gdf
 
+def normalize_parcel_id(value):
+    """
+    Convert parcel IDs to a stable string representation.
+
+    Examples:
+        123      -> "123"
+        123.0    -> "123"
+        "123"    -> "123"
+        "123.0"  -> "123"
+        "ABC01"  -> "ABC01"
+        None     -> None
+    """
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+
+    if isinstance(value, (float, np.floating)):
+        if float(value).is_integer():
+            return str(int(value))
+        return str(value)
+
+    s = str(value).strip()
+
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except Exception:
+        pass
+
+    return s
+
+
+def add_normalized_id_column(gdf, id_column, norm_column="_parcel_id_norm"):
+    """
+    Return a copy of the GeoDataFrame with a normalized parcel-id column.
+    Keeps the original ID column unchanged.
+    """
+    out = gdf.copy()
+    out[norm_column] = out[id_column].apply(normalize_parcel_id)
+    return out
+
+def make_gdf_json_safe(gdf):
+    gdf = gdf.copy()
+
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue
+
+        series = gdf[col]
+
+        if pd.api.types.is_datetime64_any_dtype(series):
+            gdf[col] = series.astype(str)
+        elif series.dtype == "object":
+            def convert_value(x):
+                if x is None:
+                    return None
+                if hasattr(x, "isoformat"):
+                    try:
+                        return x.isoformat()
+                    except Exception:
+                        return str(x)
+                return x
+            gdf[col] = series.apply(convert_value)
+
+    return gdf
+
 def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_column : str, \
                     start_date : str, end_date : str, connection ) :
     """
     Function that downloads the netcdf files through the openEO API
-
-    Parameters
-    ----------
-    polygons_gdf : gpd.GeoDataFrame
-        GeoDataFrame with the list of polygons to process
-        
-    output_folder : str
-        String pointing to the output folder    
-    
-    id_column : str
-        Identifier of the gdf column used to name the netcdf files
-
-    start_date : str
-        String defying the start date
-        
-    end_date : str
-        String defying the stop date
-        
-    connection : openeo.rest.connection.Connection
-        openeo connection
-
-    Returns
-    -------
-    None.
     """
     # Retry settings
     max_retries = 3
-    wait_seconds = 60    
-    
+    wait_seconds = 60
+
+    # Work on a copy and normalize the parcel IDs once
+    polygons_gdf = add_normalized_id_column(polygons_gdf, id_column)
+
     # Reproject to EPSG:3035 in order to apply the buffer in meters
-    polygons_gdf = polygons_gdf.to_crs("EPSG:3035")  # Example CRS, adjust as needed
+    polygons_gdf = polygons_gdf.to_crs("EPSG:3035")
 
     # Buffer by 50 meters
     buffer_value = 50
     gdf_buffered = polygons_gdf.copy()
     gdf_buffered["geometry"] = gdf_buffered.geometry.buffer(buffer_value)
-    
+
     # Convert each buffered geometry to its bounding box
     gdf_extent = gdf_buffered.copy()
     gdf_extent["geometry"] = gdf_buffered.geometry.apply(lambda geom: box(*geom.bounds))
 
-    parcel_ids = polygons_gdf[id_column].astype(str).tolist()
+    # Use normalized IDs for file existence checks
+    parcel_ids = polygons_gdf["_parcel_id_norm"].tolist()
 
     expected_files = [
         os.path.join(
@@ -272,9 +327,8 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
     if len(missing_files) == 0:
         print("✅ All NetCDF files already exist. Skipping job creation.")
         return
-    
-    
-    #information for file naming
+
+    # information for file naming
     filename_prefix = f"S2_extract_{start_date}_{end_date}_parcelid"
 
     subsets = split_extent(gdf_extent)
@@ -282,16 +336,16 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
     print(f"Processing {total_subsets} subset(s)...")
 
     for subset_idx, subset in enumerate(subsets, start=1):
-    
+
         print(f"\n▶ Processing subset {subset_idx}/{total_subsets} ({len(subset)} polygon(s))")
-    
+
         # creating datacube - S2 bands
         subset = subset.to_crs(epsg=4326)
         spatial_extent = get_spatial_extent(subset)
-    
+
         # list of bands to be extracted
         bands = ["B02", "B03", "B04", "B08", "B11", "SCL"]
-    
+
         s2_bands = connection.load_collection(
             "SENTINEL2_L2A",
             temporal_extent=[start_date, end_date],
@@ -299,55 +353,60 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
             bands=bands,
             max_cloud_cover=50
         )
-    
+
         # cloud masking
         scl = s2_bands.band("SCL")
         cloud_mask = (
             (scl == 0) | (scl == 1) | (scl == 3) |
             (scl == 8) | (scl == 9) | (scl == 11)
         )
-    
+
         cloud_mask = cloud_mask.resample_cube_spatial(s2_bands)
         s2_bands_masked = s2_bands.mask(cloud_mask)
-    
+
         # loading the dataset to json - for the spatial filter
+        subset = subset.copy()
+        for col in subset.columns:
+            if pd.api.types.is_datetime64_any_dtype(subset[col]):
+                subset[col] = subset[col].astype(str)
+        
         features = json.loads(subset.to_json())
-    
+
         # spatial filter - using only the pixels intersecting the polygons
         s2_bands_masked = s2_bands_masked.filter_spatial(features)
-    
+
         # adding NDVI index
         indices = append_indices(
             s2_bands_masked,
             indices=["NDVI"],
             platform="SENTINEL2"
         )
-    
-        # creating the job for server execution
+
+        # IMPORTANT:
+        # Keep feature_id_property=id_column unchanged so openEO still uses the real source column.
         job = indices.create_job(
             title="S2 bands and NDVI",
             description="Sentinel-2 L2A bands and NDVI",
             out_format="netCDF",
             filename_prefix=filename_prefix,
-            feature_id_property=id_column,
+            feature_id_property="_parcel_id_norm",
             sample_by_feature=True,
         )
-    
-        # executing the job and saving the results as NetCDF
+
         from rich.console import Console
         console = Console(force_jupyter=True)
-    
+
         for attempt in range(1, max_retries + 1):
             last_message = {"value": None}
-    
+
             try:
                 print(f"   ↳ Attempt {attempt}/{max_retries}")
-    
+
                 with console.status(
                     f"Subset {subset_idx}/{total_subsets}: submitting job...",
                     spinner="dots"
                 ) as status:
-    
+
                     def custom_print(raw_message):
                         try:
                             elapsed_time = raw_message.split()[0]
@@ -355,7 +414,7 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
                         except Exception:
                             elapsed_time = ""
                             job_id = "unknown"
-    
+
                         if "start" in raw_message:
                             message = (
                                 f"🚀 Subset {subset_idx}/{total_subsets}: "
@@ -383,15 +442,15 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
                             )
                         else:
                             message = f"Subset {subset_idx}/{total_subsets}: {raw_message}"
-    
+
                         last_message["value"] = message
                         status.update(message)
-    
+
                     job.start_and_wait(print=custom_print)
-    
+
                 if last_message["value"] is not None:
                     print(last_message["value"])
-    
+
                 job_status = job.status()
                 if job_status == "finished":
                     job.get_results().download_files(output_folder)
@@ -400,16 +459,17 @@ def download_netcdf(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_col
                     break
                 else:
                     raise RuntimeError(f"Job ended with status '{job_status}'")
-    
+
             except Exception as e:
                 print(f"❌ Subset {subset_idx}/{total_subsets} failed (attempt {attempt}/{max_retries}): {e}")
-    
+
                 if attempt < max_retries:
                     print(f"   ↳ Retrying in {wait_seconds} seconds...")
                     time.sleep(wait_seconds)
                 else:
                     print(f"❌ Subset {subset_idx}/{total_subsets} permanently failed after {max_retries} retries.")
 
+                    
 def download_netcdf_ext(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id_column : str, \
                         start_date : str, end_date : str, connection ) :
     """
@@ -491,6 +551,11 @@ def download_netcdf_ext(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id
         
     
         #loading the dataset o json - for the spatial filter
+        subset = subset.copy()
+        for col in subset.columns:
+            if pd.api.types.is_datetime64_any_dtype(subset[col]):
+                subset[col] = subset[col].astype(str)
+        
         features = json.loads(subset.to_json())    
     
         #spatial filter - using only the pixels intersecting the polygons
@@ -505,11 +570,11 @@ def download_netcdf_ext(polygons_gdf : gpd.GeoDataFrame, output_folder : str, id
     
         #creating the job for server execution 
         job = indices.create_job(
-            title=title,
-            description="Sentinel-2 L2A bands and indices",
+            title="S2 bands and NDVI",
+            description="Sentinel-2 L2A bands and NDVI",
             out_format="netCDF",
-            filename_prefix=filename_prefix, 
-            feature_id_property=id_column,
+            filename_prefix=filename_prefix,
+            feature_id_property="_parcel_id_norm",
             sample_by_feature=True,
         )
             
@@ -1117,6 +1182,8 @@ class OpenEODashboard(widgets.VBox):
                 self.id_column = id_column
                 self.output_folder = output_folder
 
+                self.gdf = add_normalized_id_column(self.gdf, self.id_column)
+
                 print(f"🗺️ Processing file: {filename}...")
                 #print(f"Dataset hash: {upload_hash}")
                 print(f"Date range: {start_str} → {end_str}")
@@ -1161,6 +1228,8 @@ class DrawPolygonDashboard(widgets.VBox):
         self.max_date_span_years = 3
         self.min_date_span_days = 3
         self.recent_date_threshold_days = 7
+
+        self.norm_id_column = "_parcel_id_norm"
 
         # Validation flag
         self._ok_dates = False
@@ -1487,9 +1556,12 @@ class DrawPolygonDashboard(widgets.VBox):
 
     def rebuild_labels(self):
         self.labels_group.layers = tuple()
-
+    
         for f in self.features_fc["features"]:
             geom = shape(f["geometry"])
+            if geom is None or geom.is_empty:
+                continue
+    
             c = geom.centroid
             aoi_id = f.get("properties", {}).get("aoi_id")
             if aoi_id is not None:
@@ -1655,20 +1727,21 @@ class MapAndPlotWidget(widgets.VBox):
     Class containing the map and the interfaces for plotting specialized plots
     """
     def __init__(self, openDashboard):
-        super().__init__() # Initialize the parent VBox
-        
+        super().__init__()
+
         # Member objects
-        self.gdf = openDashboard.gdf
+        self.gdf = add_normalized_id_column(openDashboard.gdf, openDashboard.id_column)
         self.id_column = openDashboard.id_column
+        self.norm_id_column = "_parcel_id_norm"
         self.output_folder = openDashboard.output_folder
-        
+
         self.output_log = widgets.Output()
-        
+
         start_date = openDashboard.start_date.value.strftime('%Y-%m-%d')
         end_date = openDashboard.end_date.value.strftime('%Y-%m-%d')
         self.dataset_tag = getattr(openDashboard, 'dataset_tag', _build_dataset_tag(start_date, end_date))
         self.netcdf_prefix = f"S2_extract_{start_date}_{end_date}_parcelid_"
-        
+
         # Reuse existing map if provided, otherwise create one
         self._reusing_existing_map = False
         self._from_draw_dashboard = False
@@ -1688,20 +1761,16 @@ class MapAndPlotWidget(widgets.VBox):
         self._refreshing_labels = False
         self.m.observe(self._on_map_layers_change, names="layers")
 
-        # When the viewer is opened from the polygon-drawing workflow,
-        # keep the current map state as-is. This avoids re-adding the dataset
-        # layer and re-zooming after processing, which can re-show stale shapes
-        # from a previous edit state.
         self._from_draw_dashboard = isinstance(openDashboard, DrawPolygonDashboard)
 
         self._id_ok = True
         self._plot_type_ok = False
         self._plot_options_ok = False
-        
-        # ID dropdown setup
-        unique_vals = sorted(self.gdf[self.id_column].unique().tolist())
+
+        # ID dropdown setup: use normalized IDs only
+        unique_vals = sorted(self.gdf[self.norm_id_column].dropna().unique().tolist())
         self.id_dropdown = widgets.Dropdown(
-            description="Parcel ID:", 
+            description="Parcel ID:",
             options=unique_vals,
             style={'description_width': 'initial'}
         )
@@ -1853,49 +1922,72 @@ class MapAndPlotWidget(widgets.VBox):
                 continue
     
             c = geom.centroid
-            parcel_id = row[self.id_column]
-            self.add_plain_number_label(c.y, c.x, str(parcel_id))
+            parcel_id = row[self.norm_id_column]
+            if parcel_id is not None:
+                self.add_plain_number_label(c.y, c.x, parcel_id)
+            
     def _get_netcdf_path(self, parcel_id):
+        parcel_id = normalize_parcel_id(parcel_id)
         return os.path.join(self.output_folder, f"{self.netcdf_prefix}{parcel_id}.nc")
-
+    
     def _get_stats_csv_path(self, parcel_id):
+        parcel_id = normalize_parcel_id(parcel_id)
         stat_dir = os.path.join(self.output_folder, "band_stats")
         os.makedirs(stat_dir, exist_ok=True)
         return os.path.join(stat_dir, f"{parcel_id}_stats_{self.dataset_tag}.csv")
-
+    
     def _get_ndvi_plot_path(self, parcel_id):
+        parcel_id = normalize_parcel_id(parcel_id)
         ndvi_dir = os.path.join(self.output_folder, 'ndvi')
         os.makedirs(ndvi_dir, exist_ok=True)
         return os.path.join(ndvi_dir, f"{parcel_id}_NDVI_{self.dataset_tag}.png")
-
+    
     def _get_line_plot_path(self, parcel_id, band_name):
+        parcel_id = normalize_parcel_id(parcel_id)
         safe_band = str(band_name).replace(' ', '_').replace('/', '-')
         plots_dir = os.path.join(self.output_folder, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
         return os.path.join(plots_dir, f"{parcel_id}_{safe_band}_{self.dataset_tag}.png")
-
+    
     def _get_cview_png_path(self, parcel_id, suffix):
+        parcel_id = normalize_parcel_id(parcel_id)
         cview_dir = os.path.join(self.output_folder, 'cview')
         os.makedirs(cview_dir, exist_ok=True)
         return os.path.join(cview_dir, f"{parcel_id}_{suffix}_{self.dataset_tag}.png")
-
+    
     def _get_cview_pickle_path(self, parcel_id, suffix):
+        parcel_id = normalize_parcel_id(parcel_id)
         cview_dir = os.path.join(self.output_folder, 'cview')
         os.makedirs(cview_dir, exist_ok=True)
         return os.path.join(cview_dir, f"{parcel_id}_{suffix}_{self.dataset_tag}.pickle")
 
     def _compute_stats_csv(self, parcel_id, netcdf_path, csv_filename):
-        parcel = self.gdf[self.gdf[self.id_column] == parcel_id]
+        parcel_id = normalize_parcel_id(parcel_id)
+    
+        parcel = self.gdf[self.gdf[self.norm_id_column] == parcel_id]
+    
+        if parcel.empty:
+            raise ValueError(f"No parcel found for normalized ID: {parcel_id}")
+    
         out_dir = os.path.dirname(csv_filename)
         default_csv = os.path.join(out_dir, f"{parcel_id}_stats.csv")
+    
         if os.path.exists(default_csv):
             os.remove(default_csv)
+    
         with xr.open_dataset(netcdf_path) as ds:
             crs_wkt = ds["crs"].attrs.get("crs_wkt")
             if crs_wkt:
                 ds = ds.rio.write_crs(crs_wkt)
-            nu.ds_statistics_to_parcel_csv(ds, parcel, parcel_id, out_dir=out_dir,
-                                           scl_list=[0, 1, 3, 8, 9, 11])
+    
+            nu.ds_statistics_to_parcel_csv(
+                ds,
+                parcel,
+                parcel_id,
+                out_dir=out_dir,
+                scl_list=[0, 1, 3, 8, 9, 11]
+            )
+    
         if os.path.exists(default_csv) and default_csv != csv_filename:
             if os.path.exists(csv_filename):
                 os.remove(csv_filename)
@@ -1906,14 +1998,24 @@ class MapAndPlotWidget(widgets.VBox):
         self.btn_display.disabled = not (self._id_ok and self._plot_type_ok and self._plot_options_ok)
 
     def _on_id_change(self, change):
-        """Zoom the map when dropdown value changes"""
-        selected_val = change['new']
-        self._id_ok = selected_val is not None
-
-        if selected_val is not None and self.gdf is not None:
-            subset = self.gdf[self.gdf[self.id_column] == selected_val]
-            if not subset.empty:
+        with self.output_log:
+            selected_val = normalize_parcel_id(change['new'])
+            if selected_val is None:
+                return
+    
+            subset = self.gdf[self.gdf[self.norm_id_column] == selected_val]
+            if subset.empty:
+                return
+    
+            self.refresh_labels_on_top()
+    
+            try:
                 self.m.zoom_to_gdf(subset)
+            except Exception:
+                pass
+    
+            self._update_display_button()
+                
     def _on_basemap_change(self, change):
         if change["name"] != "value":
             return
@@ -2050,7 +2152,9 @@ class MapAndPlotWidget(widgets.VBox):
             fig, ax = out
             plt.show()
             plt.close(fig)
+            
     def _gdf_to_clean_geojson(self, gdf):
+        gdf = make_gdf_json_safe(gdf)
         geojson = json.loads(gdf.to_json())
     
         reserved_props = {
@@ -2128,33 +2232,27 @@ class MapAndPlotWidget(widgets.VBox):
         """Actions to perform when a parcel is clicked"""
         with self.output_log:
             props = feature.get('properties', {})
-            parcel_id = props.get(self.id_column)
-            
+            parcel_id = normalize_parcel_id(props.get(self.id_column))
+    
             if parcel_id is None:
                 return
-
-            # 1. Update Dropdown (triggers on_value_change zoom)
-            #self.id_dropdown.value = parcel_id
+    
             self._set_dropdown_silently(parcel_id)
-                 
-            # 2. Path Logic
-            #folder_name = os.path.splitext(self.filename)[0]
-            #output_path = os.path.join(self.base_folder, folder_name)
+    
             output_path = self.output_folder
             netcdf_path = self._get_netcdf_path(parcel_id)
-             
+    
             if os.path.exists(netcdf_path):
                 csv_filename = self._get_stats_csv_path(parcel_id)
                 if not os.path.exists(csv_filename):
                     self._compute_stats_csv(parcel_id, netcdf_path, csv_filename)
-
+    
                 ndvi_image_path = self._get_ndvi_plot_path(parcel_id)
                 if not os.path.exists(ndvi_image_path):
                     fig_ndvi, _ = cgu.plot_csv_parcel(csv_filename, band_to_plot="NDVI", to_file=False)
                     fig_ndvi.savefig(ndvi_image_path, bbox_inches='tight', dpi=100)
                     plt.close(fig_ndvi)
-                
-                # Prepare HTML for Popup
+    
                 if os.path.exists(ndvi_image_path):
                     with open(ndvi_image_path, "rb") as f:
                         encoded_string = base64.b64encode(f.read()).decode()
@@ -2169,26 +2267,21 @@ class MapAndPlotWidget(widgets.VBox):
                     html_content = "<b>Plot generated but file not found.</b>"
             else:
                 html_content = f"<b>Data not extracted for ID: {parcel_id}</b><br>Please run extraction first."
-
-            # 3. Create and Show Popup
-            # Remove previous popups to keep map clean
+    
             for layer in list(self.m.layers):
                 if isinstance(layer, Popup):
                     self.m.remove_layer(layer)
-            
+    
             popup = Popup(
                 location=kwargs.get("coordinates"),
                 child=HTML(value=html_content),
                 close_button=True,
                 max_width=550,
-                auto_pan=True,                 # pan only (no zoom) to keep popup visible
-                auto_pan_padding=(20, 20),     # keep it away from edges so close button is accessible
+                auto_pan=True,
+                auto_pan_padding=(20, 20),
             )
-
-            # First refresh labels
+    
             self.refresh_labels_on_top()
-            
-            # Then add popup as the last layer so it stays visible
             self.m.add_layer(popup)
 
 
@@ -2227,7 +2320,7 @@ class MapAndPlotWidget(widgets.VBox):
         return fig, ax
 
     def get_calendar_view(self, stretch_table=None):
-        """ 
+        """
         Function to generate the calendar view for RGB/false-color or single-band NDVI.
         """
         if self.dd_plot_param.value is None:
@@ -2252,13 +2345,13 @@ class MapAndPlotWidget(widgets.VBox):
             bandlist = list(stretch_table.keys())
             sc_dict = None
             is_scatter = False
-
+    
         elif self.dd_plot_param.value == 'NDVI':
             stretch_table = None
             bandlist = ['NDVI']
             sc_dict = None
             is_scatter = False
-
+    
         elif self.dd_plot_param.value == 'Scatter B04-B08':
             stretch_table = None
             bandlist = None
@@ -2272,12 +2365,12 @@ class MapAndPlotWidget(widgets.VBox):
                 'cumulative_color': 'blue'
             }
             is_scatter = True
-
+    
         else:
             print(f"Unsupported calendar view option: {self.dd_plot_param.value}")
             return None
     
-        parcel_id = self.id_dropdown.value
+        parcel_id = normalize_parcel_id(self.id_dropdown.value)
     
         output_path = self.output_folder
         netcdf_path = self._get_netcdf_path(parcel_id)
@@ -2288,28 +2381,32 @@ class MapAndPlotWidget(widgets.VBox):
     
         cview_dir = os.path.join(output_path, 'cview')
         os.makedirs(cview_dir, exist_ok=True)
-
+    
         if is_scatter:
             suffix = f"{sc_dict['x']}_{sc_dict['y']}_scatter"
         else:
             suffix = ''.join(bandlist)
-        
+    
         cview_filename = self._get_cview_pickle_path(parcel_id, suffix)
         cview_png = self._get_cview_png_path(parcel_id, suffix)
     
         if not os.path.exists(cview_filename):
-            parcel = self.gdf[self.gdf[self.id_column] == parcel_id]
+            parcel = self.gdf[self.gdf[self.norm_id_column] == parcel_id]
+    
+            if parcel.empty:
+                raise ValueError(f"No parcel found for normalized ID: {parcel_id}")
     
             with xr.open_dataset(netcdf_path) as ds:
                 crs_wkt = ds["crs"].attrs.get("crs_wkt")
-                ds = ds.rio.write_crs(crs_wkt)
+                if crs_wkt:
+                    ds = ds.rio.write_crs(crs_wkt)
     
                 print("Computing Calendar View - Please be patient")
                 if is_scatter:
                     fig, ax = ngu.calendar_view_half_weekly_scatter(
                         ds,
                         parcel,
-                        [self.id_column],
+                        [self.norm_id_column],
                         out_tif_folder_base=cview_dir,
                         sc_dict=sc_dict
                     )
@@ -2317,11 +2414,12 @@ class MapAndPlotWidget(widgets.VBox):
                     fig, ax = ngu.calendar_view_half_weekly(
                         ds,
                         parcel,
-                        [self.id_column],
+                        [self.norm_id_column],
                         bandlist,
                         out_tif_folder_base=cview_dir,
                         stretch_table=stretch_table
                     )
+    
                 fig.savefig(cview_png, dpi=100, bbox_inches='tight')
                 with open(cview_filename, 'wb') as f:
                     pickle.dump(fig, f)
