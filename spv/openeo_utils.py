@@ -1767,7 +1767,8 @@ class MapAndPlotWidget(widgets.VBox):
             widget=self.basemap_box,
             position="topright"
         )
-        self.m.add_control(self.basemap_control)        
+        if not (self._reusing_existing_map and self._from_draw_dashboard):
+            self.m.add_control(self.basemap_control)        
         
         self.children = [
             self.m,

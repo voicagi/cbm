@@ -342,131 +342,136 @@ def plot_csv_parcel(csv_filename, output_folder : str = "./", \
             
     return fig, ax
 
-def plot_csv_parcel_std(csv_filename, output_folder: str = "./",
-                    band_to_plot: str = "NDVI",
-                    cols_to_plot: list = ["band_mean", "band_std"],
-                    ax_dict=None, to_file=True):
-    """
-    Summary :
-        Function used to plot a time index extracted from a CSV file.
-        In this case, it assumes that all the bands are saved in a single file.
-        A single parcel is considered.
-    """
+def plot_csv_parcel_std(
+    csv_filename,
+    output_folder: str = "./",
+    band_to_plot: str = "NDVI",
+    cols_to_plot: list = ["band_mean", "band_std"],
+    ax_dict=None,
+    to_file=True
+):
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
 
     filename = os.path.basename(csv_filename)
 
     if not filename.endswith(".csv"):
         raise ValueError("Not a correct csv file")
 
-    # Read CSV
     df = pd.read_csv(csv_filename)
-
-    # Filter the df with respect to the specified band
     df = df[df["band"] == band_to_plot].copy()
 
-    # Convert the acquisition dates to datetime objects
+    if df.empty:
+        raise ValueError(f"No data found for band '{band_to_plot}' in {csv_filename}")
+
     df["acq_date"] = pd.to_datetime(df["acq_date"])
+    df.sort_values(by=["acq_date"], inplace=True)
 
-    # Determine the parcel id
-    fid = np.unique(df["Field_ID"].values).astype(str)[0]
+    fid = np.unique(df["Field_ID"].astype(str).values)[0]
 
-    # Check if the output directory exists
     if to_file and (not os.path.exists(output_folder)):
         os.makedirs(output_folder)
 
-    df.sort_values(by=["acq_date"], inplace=True)
-
-    # Allocate the figure
     if ax_dict is None:
         fig, ax = plt.subplots(figsize=(13, 7))
     else:
         ax = ax_dict[fid]
         fig = ax.get_figure()
+        ax.clear()
 
-    # -------- STYLE --------
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
+    # --- STYLE TO MATCH YOUR SCREENSHOT ---
+    fig.patch.set_facecolor("#EAEAEA")
+    ax.set_facecolor("#EAEAEA")
 
-    # Clean spines
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color("#B0B0B0")
-    ax.spines["bottom"].set_color("#B0B0B0")
-    ax.spines["left"].set_linewidth(0.8)
-    ax.spines["bottom"].set_linewidth(0.8)
+    # Standard visible spines
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_color("black")
 
-    # Softer grid
-    ax.grid(True, axis="y", linestyle="--", linewidth=0.7, alpha=0.5)
-    ax.grid(True, axis="x", linestyle="--", linewidth=0.5, alpha=0.25)
+    # Grid similar to the screenshot
+    ax.grid(True, which="major", axis="both",
+            linestyle="-", linewidth=0.8, color="#9E9E9E", alpha=0.75)
 
-    # Tick styling
-    ax.tick_params(axis="x", labelsize=10, rotation=30)
-    ax.tick_params(axis="y", labelsize=10)
+    # Tick style
+    ax.tick_params(axis="x", labelsize=11, rotation=30)
+    ax.tick_params(axis="y", labelsize=11)
+
+    x = df["acq_date"]
+    y = df[cols_to_plot[0]]
 
     if len(cols_to_plot) == 1:
         ax.plot(
-            df["acq_date"],
-            df[cols_to_plot[0]],
-            marker="o",
-            markersize=6,
-            linewidth=2.2,
+            x, y,
             color="forestgreen",
-            markerfacecolor="white",
+            linewidth=1.8,
+            marker="o",
+            markersize=4.8,
+            markerfacecolor="forestgreen",
             markeredgecolor="forestgreen",
-            markeredgewidth=1.5
+            markeredgewidth=0.8
         )
     else:
+        yerr = df[cols_to_plot[1]].fillna(0)
+
         ax.errorbar(
-            df["acq_date"],
-            df[cols_to_plot[0]],
-            yerr=df[cols_to_plot[1]],
+            x, y,
+            yerr=yerr,
             fmt="o-",
             color="forestgreen",
-            linewidth=2.2,
-            markersize=6,
-            markerfacecolor="white",
+            linewidth=1.8,
+            markersize=4.8,
+            markerfacecolor="forestgreen",
             markeredgecolor="forestgreen",
-            markeredgewidth=1.5,
-            ecolor="dimgray",
-            elinewidth=1.0,
-            capsize=0,
-            alpha=0.95
+            markeredgewidth=0.8,
+            ecolor="#222222",
+            elinewidth=1.1,
+            capsize=3,
+            capthick=1.1
         )
 
-    # Labels and title
-    ax.set_ylabel(band_to_plot, fontsize=12, fontweight="semibold")
-    ax.set_xlabel("Acquisition date", fontsize=12, fontweight="semibold")
-    ax.set_title(
-        f"Parcel {fid} — {band_to_plot} time series",
-        fontsize=14,
-        fontweight="bold",
-        pad=14
-    )
+    # Labels and title: plain and technical
+    ax.set_ylabel(band_to_plot, fontsize=12)
+    ax.set_xlabel("Date", fontsize=12)
+    ax.set_title(f"Parcel id: {fid}", fontsize=16)
 
     # Date formatting
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
 
-    # Add a little vertical padding
-    y = df[cols_to_plot[0]].dropna()
-    if not y.empty:
-        ymin = y.min()
-        ymax = y.max()
-        yrange = ymax - ymin
+    # Y limits with padding including std bars
+    y_valid = y.dropna()
+    if not y_valid.empty:
+        if len(cols_to_plot) > 1:
+            yerr_valid = df.loc[y_valid.index, cols_to_plot[1]].fillna(0)
+            ymin = (y_valid - yerr_valid).min()
+            ymax = (y_valid + yerr_valid).max()
+        else:
+            ymin = y_valid.min()
+            ymax = y_valid.max()
 
+        yrange = ymax - ymin
         if yrange == 0:
             pad = max(abs(ymin) * 0.05, 0.05)
         else:
-            pad = yrange * 0.12
+            pad = yrange * 0.08
 
         ax.set_ylim(ymin - pad, ymax + pad)
 
-    ax.margins(x=0.02)
-    fig.tight_layout()
+    ax.margins(x=0.01)
+
     fig.autofmt_xdate()
+    fig.tight_layout()
 
     if to_file:
-        fig.savefig(f"{output_folder}/{fid}_{band_to_plot}.png", dpi=150, bbox_inches="tight")
+        fig.savefig(
+            f"{output_folder}/{fid}_{band_to_plot}.png",
+            dpi=150,
+            bbox_inches="tight",
+            facecolor=fig.get_facecolor()
+        )
         plt.close(fig)
 
     return fig, ax
